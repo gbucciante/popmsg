@@ -1,0 +1,63 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon0
+      - run: pip install -r requirements.txt
+      - run: python tests/test_engine.py
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: POPMSG-windows
+          - os: macos-latest
+            artifact: POPMSG-macos
+          - os: ubuntu-22.04
+            artifact: POPMSG-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon0
+      - run: pip install -r requirements-build.txt
+      - run: python build.py
+      - name: Impacchetta
+        shell: bash
+        run: |
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then 7z a ../${{ matrix.artifact }}.zip POPMSG.exe;
+          elif [ "$RUNNER_OS" = "macOS" ]; then ditto -c -k --keepParent POPMSG.app ../${{ matrix.artifact }}.zip;
+          else chmod +x POPMSG && tar czf ../${{ matrix.artifact }}.tar.gz POPMSG; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.*
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}.*
