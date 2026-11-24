@@ -90,7 +90,9 @@ fn end_to_end() {
     let big: Vec<u8> = (0..3_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
     std::fs::write(src.join("doc.bin"), &big).unwrap();
     std::fs::write(src.join("cartella/uno.txt"), "uno").unwrap();
-    std::fs::write(src.join("cartella/sub/due:tre.txt"), "due".repeat(1000)).unwrap();
+    // ':' non è ammesso nei nomi di file su Windows
+    let (src_name, dst_name) = if cfg!(windows) { ("due tre.txt", "due tre.txt") } else { ("due:tre.txt", "due_tre.txt") };
+    std::fs::write(src.join("cartella/sub").join(src_name), "due".repeat(1000)).unwrap();
     let att: Vec<PathBuf> = vec![src.join("doc.bin"), src.join("cartella")];
     a.send_message(&[ub.clone()], "allegati", false, &att);
     let m = msg(&rb);
@@ -104,7 +106,7 @@ fn end_to_end() {
     assert_eq!(std::fs::read(f).unwrap(), big);
     let d = b.download(&m, &m.files[1], &dest, &mut |_, _, _| {}, &c).unwrap();
     assert_eq!(std::fs::read_to_string(d.join("uno.txt")).unwrap(), "uno");
-    assert_eq!(std::fs::read_to_string(d.join("sub/due_tre.txt")).unwrap(), "due".repeat(1000));
+    assert_eq!(std::fs::read_to_string(d.join("sub").join(dst_name)).unwrap(), "due".repeat(1000));
 
     // destinatario senza cifratura: passa in chiaro
     let (c3, rc) = eng("Carla", 25303, &[25301], false);
