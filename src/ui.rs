@@ -312,7 +312,7 @@ impl SendWin {
             l.handle(move |l, ev| {
                 if ev == Event::Push && app::event_mouse_button() == app::MouseButton::Right {
                     // seleziona la riga sotto il mouse se non è già selezionata
-                    let menu = fltk::menu::MenuItem::new(&["Modifica Tel…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)"]);
+                    let menu = fltk::menu::MenuItem::new(&["Modifica Tel…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Informazioni su POPMSG"]);
                     if let Some(item) = menu.popup(app::event_x(), app::event_y()) {
                         let targets: Vec<(User, bool)> = {
                             let rows = s.rows.borrow();
@@ -333,6 +333,9 @@ impl SendWin {
                                 }
                             }
                             "Aggiorna elenco" => c.engine.refresh(),
+                            "Impostazioni…" => c.tray_cmd(TrayCmd::Settings),
+                            "Registro messaggi" => c.tray_cmd(TrayCmd::Log),
+                            "Informazioni su POPMSG" => c.tray_cmd(TrayCmd::About),
                             "Messaggio di assenza…" => sel.iter().for_each(|u| c.engine.request_absence(u)),
                             "Togli dalla lista (se non in linea)" => {
                                 for t in targets.iter().filter(|t| !t.1) {
@@ -659,7 +662,7 @@ fn open_path(p: &Path) {
 // ============================================================ impostazioni
 fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     let cfg = ctl.cfg.borrow().clone();
-    let mut win = Window::default().with_size(470, 500).with_label("Impostazioni di POPMSG").center_screen();
+    let mut win = Window::default().with_size(480, 520).with_label("Impostazioni di POPMSG").center_screen();
     let mut col = Flex::default_fill().column();
     col.set_margin(10);
     col.set_pad(6);
@@ -689,6 +692,7 @@ fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     let quote = check("Cita il messaggio quando rispondi", cfg.quote, &mut col);
     let seal = check("Sigilla i messaggi per impostazione predefinita", cfg.seal, &mut col);
     let enc = check("Cifra i messaggi (RSA 2048 + AES 256)", cfg.encryption, &mut col);
+    let offline = check("Mostra in grigio chi non è in linea e tieni i messaggi in attesa", cfg.offline, &mut col);
     let log = check("Registra i messaggi su file", cfg.log_enabled, &mut col);
     let auto = check("Avvia POPMSG all'accesso a Windows", config::autostart_enabled(), &mut col);
     if !cfg!(windows) {
@@ -743,6 +747,7 @@ fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     c.quote = quote.value();
     c.seal = seal.value();
     c.encryption = enc.value();
+    c.offline = offline.value();
     c.log_enabled = log.value();
     if cfg!(windows) && auto.value() != config::autostart_enabled() {
         config::set_autostart(auto.value());
@@ -859,6 +864,9 @@ impl Ctl {
         let online = self.engine.users();
         let keys: std::collections::HashSet<String> = online.iter().map(|u| u.book_key()).collect();
         let mut out: Vec<(User, bool)> = online.into_iter().map(|u| (u, true)).collect();
+        if !self.cfg.borrow().offline {
+            return out;
+        }
         for k in config::known_all() {
             if keys.contains(&k.key) {
                 continue;
@@ -1001,7 +1009,7 @@ impl Ctl {
             &format!("Il messaggio a {} non è stato consegnato.\nVuoi riprovare ora o lasciarlo in attesa finché torna in linea?", u.name()),
             "Annulla",
             "Riprova",
-            "In attesa",
+            if self.cfg.borrow().offline { "In attesa" } else { "" },
         );
         if r == Some(1) {
             let target = self.engine.user(&u.addr).unwrap_or(u);

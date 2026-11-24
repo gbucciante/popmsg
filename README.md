@@ -17,6 +17,7 @@ librerie di sistema comprese). Funziona su **Windows**, **macOS** e **Linux**.
 - Scoperta automatica degli utenti in rete (broadcast UDP), con nome, gruppo, host e IP
 - **Utenti non in linea** in grigio: si può scrivere anche a loro, il messaggio resta in attesa
   sul proprio computer e viene consegnato appena il destinatario apre POPMSG
+  (opzione attivabile in *Impostazioni*, attiva di base)
 - Colonna **Tel**: ognuno annota i numeri degli altri (tasto destro → *Modifica Tel…*),
   salvati solo sul proprio computer
 - **Emoticon** a colori (pulsante 😊), disegnate come immagini: uguali su tutti i sistemi

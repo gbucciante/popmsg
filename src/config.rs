@@ -54,6 +54,7 @@ pub struct Config {
     pub quote: bool,
     pub seal: bool,
     pub encryption: bool,
+    pub offline: bool,
     pub download_dir: String,
     pub absence_text: String,
 }
@@ -86,6 +87,7 @@ impl Config {
             quote: b("quote", true),
             seal: b("seal", false),
             encryption: b("encryption", true),
+            offline: b("offline", true),
             download_dir: s("download_dir", &downloads_dir()),
             absence_text: s("absence_text", ABSENCE_PRESETS[0].1),
         }
@@ -105,6 +107,7 @@ impl Config {
             ("quote", bl(self.quote).into()),
             ("seal", bl(self.seal).into()),
             ("encryption", bl(self.encryption).into()),
+            ("offline", bl(self.offline).into()),
             ("download_dir", self.download_dir.clone()),
             ("absence_text", self.absence_text.clone()),
         ];
