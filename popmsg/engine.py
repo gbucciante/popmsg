@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QNetworkInterface, QUdpSocket
 
+from . import crypto as C
 from . import protocol as P
 from .version import APP_NAME, APP_VERSION
 
@@ -58,6 +59,8 @@ class Message:
     command: int
     received_at: float
     files: list[P.FileInfo] = field(default_factory=list)
+    encrypted: bool = False
+    decrypt_error: str = ""
 
     @property
     def sealed(self) -> bool:
@@ -118,8 +121,14 @@ class Engine(QObject):
     error = Signal(str)
 
     def __init__(self, nick: str = "", group: str = "", port: int = P.DEFAULT_PORT,
-                 extra_broadcast: list[str] | None = None, parent=None):
+                 extra_broadcast: list[str] | None = None, private_key=None,
+                 encryption: bool = True, parent=None):
         super().__init__(parent)
+        # cifratura: chiave RSA propria e chiavi pubbliche degli altri
+        self.priv = private_key
+        self.encryption = encryption and private_key is not None
+        self.peer_keys: dict[tuple[str, int], C.PeerKey] = {}
+        self._key_wait: dict[tuple[str, int], list[tuple]] = {}
         self.login = getpass.getuser()
         self.hostname = socket.gethostname()
         self.nick = nick or self.login
@@ -187,6 +196,8 @@ class Engine(QObject):
     # ---------------------------------------------------------------- presenza
     def _entry_opts(self) -> int:
         opt = P.CAPUTF8OPT | P.FILEATTACHOPT
+        if self.priv is not None:
+            opt |= P.ENCRYPTOPT | P.ENCEXTMSGOPT
         if self.absent:
             opt |= P.ABSENCEOPT
         return opt
@@ -257,20 +268,58 @@ class Engine(QObject):
                 cmd |= P.MULTICASTOPT
             if sealed:
                 cmd |= P.SECRETEXOPT
-            tail = None
             if files:
                 cmd |= P.FILEATTACHOPT
-                tail = [file_list]
-            no, data = self._packet(cmd, text, tail)
+            no = P.next_packet_no()
             if files:
                 with self._shared_lock:
                     self._shared[no] = {a.file_id: a for a in files}
-            self._pending[no] = _Pending(data, user.key)
-            self._send(user.key, data)
+            if self.encryption and user.command & P.ENCRYPTOPT and user.key not in self.peer_keys:
+                # serve prima la chiave pubblica del destinatario
+                self._key_wait.setdefault(user.key, []).append((no, cmd, text, file_list, time.time()))
+                _, req = self._packet(P.GETPUBKEY, f"{C.OUR_CAPS:X}")
+                self._send(user.key, req)
+            else:
+                self._dispatch(user.key, no, cmd, text, file_list)
             packet_nos.append(no)
         return packet_nos
 
+    def is_encrypted_to(self, user: User) -> bool:
+        return bool(self.encryption and user.command & P.ENCRYPTOPT)
+
+    def _dispatch(self, key, no, cmd, text, file_list, allow_encrypt=True):
+        """Costruisce (cifrando se possibile) e invia un SENDMSG già numerato."""
+        tail = [file_list] if file_list else None
+        extra = text
+        peer = self.peer_keys.get(key) if (self.encryption and allow_encrypt) else None
+        user = self.users.get(key)
+        if peer and C.choose_caps(peer):
+            plain = text
+            if file_list and user and user.command & P.ENCEXTMSGOPT:
+                cmd |= P.ENCEXTMSGOPT
+                plain = text + "\0" + file_list
+                tail = None
+            try:
+                extra = C.encrypt_message(peer, plain.encode("utf-8"), no)
+                cmd |= P.ENCRYPTOPT
+            except (C.CryptoError, ValueError) as exc:
+                self.error.emit(f"Cifratura non riuscita: {exc}")
+                extra, tail = text, ([file_list] if file_list else None)
+                cmd &= ~P.ENCEXTMSGOPT
+        _, data = self._packet(cmd, extra, tail, packet_no=no)
+        self._pending[no] = _Pending(data, key)
+        self._send(key, data)
+
+    def _flush_key_wait(self, key, force_plain=False):
+        for no, cmd, text, file_list, _ in self._key_wait.pop(key, []):
+            self._dispatch(key, no, cmd, text, file_list, allow_encrypt=not force_plain)
+
     def _retry(self):
+        # chiave pubblica mai arrivata: invia comunque in chiaro (come IPMsg con peer senza chiave)
+        now = time.time()
+        for key, items in list(self._key_wait.items()):
+            if items and now - items[0][4] > 4:
+                self._flush_key_wait(key, force_plain=True)
         for no, p in list(self._pending.items()):
             p.tries += 1
             if p.tries > RETRY_COUNT:
@@ -331,6 +380,8 @@ class Engine(QObject):
             user = User(key[0], key[1], pkt.user, pkt.host, nick, group, pkt.command)
             self.users[key] = user
         else:
+            if pkt.mode in (P.BR_ENTRY, P.ANSENTRY):
+                self.peer_keys.pop(key, None)  # potrebbe aver cambiato chiave
             user.login, user.host, user.nick, user.group = pkt.user, pkt.host, nick, group
             user.command = pkt.command
             user.last_seen = time.time()
@@ -374,6 +425,16 @@ class Engine(QObject):
                 _, data = self._packet(P.ANSREADMSG, str(no))
                 self._send(key, data)
             self.messageOpened.emit(no, self._user_for(pkt, key))
+        elif mode == P.GETPUBKEY:
+            if self.priv is not None:
+                _, data = self._packet(P.ANSPUBKEY, C.build_pubkey_answer(self.priv))
+                self._send(key, data)
+        elif mode == P.ANSPUBKEY:
+            try:
+                self.peer_keys[key] = C.parse_pubkey_answer(pkt.message)
+            except C.CryptoError as exc:
+                self.error.emit(f"Chiave pubblica non valida da {key[0]}: {exc}")
+            self._flush_key_wait(key)
         elif mode == P.GETINFO:
             _, data = self._packet(P.SENDINFO, f"{APP_NAME} {APP_VERSION}")
             self._send(key, data)
@@ -411,9 +472,29 @@ class Engine(QObject):
             self._send(key, data)
         sender = user or User(key[0], key[1], pkt.user, pkt.host, pkt.user, "", 0)
         files = []
-        if pkt.has(P.FILEATTACHOPT) and pkt.tail:
-            files = P.parse_file_list(pkt.tail[0])
-        msg = Message(pkt.packet_no, sender, pkt.message, pkt.command, now, files)
+        text = pkt.message
+        file_text = pkt.tail[0] if pkt.tail else ""
+        encrypted, err = False, ""
+        if pkt.has(P.ENCRYPTOPT):
+            if self.priv is None:
+                err = "cifratura disattivata"
+            else:
+                try:
+                    plain = C.decrypt_message(self.priv, pkt.message, pkt.packet_no)
+                    dec = P.decode_bytes(plain, pkt.has(P.UTF8OPT))
+                    if pkt.has(P.ENCEXTMSGOPT) and "\0" in dec:
+                        text, file_text = dec.split("\0", 1)
+                        file_text = file_text.split("\0")[0]
+                    else:
+                        text = dec.split("\0")[0]
+                    encrypted = True
+                except (C.CryptoError, ValueError) as exc:
+                    err = str(exc)
+            if err:
+                text = f"[Messaggio cifrato che non è stato possibile decifrare: {err}]"
+        if pkt.has(P.FILEATTACHOPT) and file_text:
+            files = P.parse_file_list(file_text)
+        msg = Message(pkt.packet_no, sender, text, pkt.command, now, files, encrypted, err)
         if self.absent and not pkt.has(P.AUTORETOPT | P.BROADCASTOPT):
             _, data = self._packet(P.SENDMSG | P.AUTORETOPT, self.absence_text)
             self._send(key, data)

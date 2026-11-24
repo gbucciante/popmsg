@@ -10,6 +10,7 @@ from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer
 
 from popmsg import protocol as P
 from popmsg.engine import Engine
+from popmsg import crypto as C
 
 
 def wait(cond, ms=4000):
@@ -35,11 +36,29 @@ def test_protocol():
     assert P.parse_packet(legacy).message == "こんにちは"
 
 
+def test_crypto():
+    k = C.generate_private_key()
+    peer = C.parse_pubkey_answer(C.build_pubkey_answer(k))
+    assert peer.bits == 2048 and peer.caps & C.AES_256
+    for caps_b64 in (False, True):
+        if caps_b64:
+            peer.caps |= C.ENCODE_BASE64
+        ct = C.encrypt_message(peer, "messaggio segreto àèì".encode(), 123456)
+        assert C.decrypt_message(k, ct, 123456).decode() == "messaggio segreto àèì"
+    # chiave di sessione in ordine di byte inverso (CryptoAPI)
+    caps, ek, body = ct.split(":")
+    ek_rev = bytes.fromhex(ek)[::-1].hex() if all(ch in "0123456789ABCDEF" for ch in ek) else ek
+    print("crypto ok")
+
+
 def main():
     app = QCoreApplication(sys.argv)
     test_protocol()
-    a = Engine("Alice", "Ufficio", port=25101, extra_broadcast=["127.0.0.1:25102"])
-    b = Engine("Bruno", "Magazzino", port=25102, extra_broadcast=["127.0.0.1:25101"])
+    test_crypto()
+    a = Engine("Alice", "Ufficio", port=25101, extra_broadcast=["127.0.0.1:25102"],
+               private_key=C.generate_private_key())
+    b = Engine("Bruno", "Magazzino", port=25102, extra_broadcast=["127.0.0.1:25101"],
+               private_key=C.generate_private_key())
     assert a.start() and b.start()
     a.broadcast_entry()
     assert wait(lambda: any(u.nick == "Bruno" for u in a.users.values())
@@ -57,6 +76,7 @@ def main():
     [no] = a.send_message([ub], "Ciao Bruno, è sigillato", sealed=True)
     assert wait(lambda: got and delivered), "messaggio non ricevuto"
     assert got[0].text == "Ciao Bruno, è sigillato" and got[0].sealed
+    assert got[0].encrypted, "il messaggio doveva essere cifrato"
     b.mark_read(got[0])
     assert wait(lambda: opened) and opened[0] == no
     print("messaggio sigillato + conferma di lettura ok")
@@ -84,6 +104,7 @@ def main():
     assert wait(lambda: got)
     msg = got[0]
     assert [f.name for f in msg.files] == ["doc.bin", "cartella"]
+    assert msg.encrypted and msg.command & P.ENCEXTMSGOPT
     dest = tempfile.mkdtemp()
     res = {}
 
@@ -98,6 +119,18 @@ def main():
     assert open(os.path.join(res["d"], "uno.txt")).read() == "uno"
     assert open(os.path.join(res["d"], "sub", "due_tre.txt")).read() == "due" * 1000
     print("file e cartelle ok")
+
+    # destinatario senza cifratura: il messaggio passa in chiaro
+    c = Engine("Carla", "Vecchio IPMsg", port=25103, extra_broadcast=["127.0.0.1:25101"])
+    assert c.start()
+    assert wait(lambda: any(u.nick == "Carla" for u in a.users.values()))
+    uc = next(u for u in a.users.values() if u.nick == "Carla")
+    gotc = []
+    c.messageReceived.connect(gotc.append)
+    a.send_message([uc], "in chiaro")
+    assert wait(lambda: gotc) and gotc[0].text == "in chiaro" and not gotc[0].encrypted
+    c.stop()
+    print("cifratura e compatibilità con client senza cifratura ok")
 
     a.stop()
     assert wait(lambda: not any(u.nick == "Alice" for u in b.users.values()))
