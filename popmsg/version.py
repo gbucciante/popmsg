@@ -1,2 +1,0 @@
-APP_NAME = "POPMSG"
-APP_VERSION = "1.0.0"

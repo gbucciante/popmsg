@@ -1,0 +1,1100 @@
+//! Finestre di POPMSG (FLTK): invio, ricezione, impostazioni, registro.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
+use fltk::{
+    app, browser::MultiBrowser, button::{Button, CheckButton, ReturnButton}, dialog, enums::{Align, Event, Font, FrameType, Key, Shortcut},
+    frame::Frame, group::{Flex, Pack, PackType}, input::Input, menu::MenuButton, prelude::*,
+    text::{TextBuffer, TextDisplay, TextEditor, WrapMode}, window::Window,
+};
+
+use crate::config::{self, Config, ABSENCE_PRESETS};
+use crate::net::{Addr, Engine, Message, User};
+use crate::protocol as p;
+use crate::tray::{self, State, TrayCmd, Tray};
+
+pub const EMOJI: &[&str] = &[
+    "😊", "😀", "😂", "😉", "😍", "😘", "😎", "🤔", "😅", "😢", "😭", "😡",
+    "😮", "😴", "🙄", "😇", "👍", "👎", "👏", "🙏", "💪", "👋", "🤝", "✌️",
+    "❤️", "💔", "🎉", "🎂", "☕", "🍕", "🍺", "⭐", "🔥", "✅", "❌", "⚠️",
+    "📎", "📞", "📅", "⏰", "💡", "🚀",
+];
+
+fn icon() -> Option<fltk::image::PngImage> {
+    fltk::image::PngImage::from_data(include_bytes!("../assets/popmsg.png")).ok()
+}
+
+fn setup_window(w: &mut Window) {
+    w.set_icon(icon());
+    w.set_callback(|w| {
+        // Esc non deve chiudere le finestre con un'azione in corso: chiudi solo con la X o Esc
+        w.hide();
+        app::delete_widget(w.clone());
+    });
+}
+
+fn time_label(t: std::time::SystemTime) -> String {
+    let dt: chrono::DateTime<chrono::Local> = t.into();
+    const DAYS: [&str; 7] = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"];
+    use chrono::Datelike;
+    format!("{} {}", DAYS[dt.weekday().num_days_from_monday() as usize], dt.format("%d/%m %H:%M:%S"))
+}
+
+fn human(n: u64) -> String {
+    let f = n as f64;
+    if n < 1024 {
+        format!("{n} B")
+    } else if f < 1024.0 * 1024.0 {
+        format!("{:.1} KB", f / 1024.0)
+    } else if f < 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} MB", f / 1048576.0)
+    } else {
+        format!("{:.1} GB", f / 1073741824.0)
+    }
+}
+
+/// Le etichette FLTK interpretano '@' e '&': li rendiamo letterali.
+fn lbl(s: &str) -> String {
+    s.replace('@', "@@").replace('&', "&&")
+}
+
+pub fn notice(title: &str, text: &str) {
+    let mut w = Window::default().with_size(340, 120).with_label(title).center_screen();
+    let mut col = Flex::default_fill().column();
+    col.set_margin(10);
+    let mut f = Frame::default().with_label(&lbl(text));
+    f.set_align(Align::Wrap | Align::Inside | Align::Left);
+    let mut row = Flex::default().row();
+    Frame::default();
+    let mut ok = ReturnButton::default().with_label("OK");
+    row.fixed(&ok, 90);
+    row.end();
+    col.fixed(&row, 28);
+    col.end();
+    w.end();
+    setup_window(&mut w);
+    let mut w2 = w.clone();
+    ok.set_callback(move |_| w2.do_callback());
+    w.show();
+}
+
+fn emoji_picker(mut buf: TextEditor) {
+    let cols = 6;
+    let rows = EMOJI.len().div_ceil(cols) as i32;
+    let mut w = Window::default().with_size(cols as i32 * 40 + 8, rows * 36 + 8).with_label("Emoticon");
+    w.set_pos(app::event_x_root() - 20, app::event_y_root() - 20);
+    for (i, e) in EMOJI.iter().enumerate() {
+        let (r, c) = ((i / cols) as i32, (i % cols) as i32);
+        let mut b = Button::new(4 + c * 40, 4 + r * 36, 38, 34, None);
+        b.set_image(crate::rich::emoji_image(i, 24));
+        b.set_tooltip(e);
+        b.set_frame(FrameType::FlatBox);
+        let mut ed = buf.clone();
+        let e = e.to_string();
+        b.set_callback(move |b| {
+            ed.insert(&e);
+            let _ = ed.take_focus();
+            if let Some(mut w) = b.window() {
+                w.hide();
+            }
+        });
+    }
+    w.end();
+    w.make_modal(false);
+    setup_window(&mut w);
+    w.show();
+    let _ = buf.take_focus();
+}
+
+// ======================================================== finestra di invio
+pub struct SendWin {
+    pub win: Window,
+    list: MultiBrowser,
+    rows: Rc<RefCell<Vec<String>>>,
+    count: Frame,
+    buf: TextBuffer,
+    seal: CheckButton,
+    att: Rc<RefCell<Vec<PathBuf>>>,
+    att_lbl: Frame,
+}
+
+impl SendWin {
+    pub fn new(ctl: &Rc<Ctl>, select: &[String], text: &str) -> Rc<SendWin> {
+        let mut win = Window::default().with_size(640, 430).with_label("Invia messaggio").center_screen();
+        win.make_resizable(true);
+        let mut col = Flex::default_fill().column();
+        col.set_margin(6);
+        col.set_pad(4);
+
+        let mut top = Flex::default().row();
+        let mut left = Flex::default().column();
+        left.set_pad(0);
+        let mut head = fltk::browser::Browser::default();
+        head.set_column_char('\t');
+        head.set_column_widths(&[130, 105, 95, 85, 100]);
+        head.add("@bUtente\t@bGruppo\t@bTel\t@bHost\t@bIndirizzo IP");
+        head.set_frame(FrameType::FlatBox);
+        head.set_color(fltk::enums::Color::Background);
+        head.set_has_scrollbar(fltk::browser::BrowserScrollbar::None);
+        head.deactivate();
+        let mut list = MultiBrowser::default();
+        list.set_column_char('\t');
+        list.set_format_char('\u{1}');
+        list.set_has_scrollbar(fltk::browser::BrowserScrollbar::Vertical);
+        list.set_column_widths(&[130, 105, 95, 85, 100]);
+        left.fixed(&head, 20);
+        left.end();
+        let mut side = Flex::default().column();
+        let mut l1 = Frame::default().with_label("Utenti");
+        l1.set_align(Align::Inside | Align::Bottom);
+        let mut count = Frame::default().with_label("0");
+        count.set_label_size(22);
+        count.set_label_font(Font::HelveticaBold);
+        let mut refresh = Button::default().with_label("Aggiorna");
+        Frame::default();
+        side.fixed(&l1, 22);
+        side.fixed(&count, 34);
+        side.fixed(&refresh, 28);
+        side.end();
+        top.fixed(&side, 80);
+        top.end();
+
+        let buf = TextBuffer::default();
+        let mut ed = TextEditor::default();
+        ed.set_buffer(buf.clone());
+        ed.wrap_mode(WrapMode::AtBounds, 0);
+        ed.set_text_size(14);
+        ed.set_scrollbar_size(12);
+
+        let mut att_lbl = Frame::default();
+        att_lbl.set_align(Align::Inside | Align::Left);
+        att_lbl.set_label_size(12);
+
+        let mut bottom = Flex::default().row();
+        let mut attach = MenuButton::default().with_label("Allega");
+        let mut emo = Button::default();
+        emo.set_image(crate::rich::emoji_image(0, 20));
+        emo.set_tooltip("Emoticon");
+        let mut seal = CheckButton::default().with_label("Sigilla");
+        seal.set_value(ctl.cfg.borrow().seal);
+        Frame::default();
+        let mut send = ReturnButton::default().with_label("Invia");
+        send.set_label_font(Font::HelveticaBold);
+        bottom.fixed(&attach, 80);
+        bottom.fixed(&emo, 40);
+        bottom.fixed(&seal, 80);
+        bottom.fixed(&send, 120);
+        bottom.end();
+
+        col.fixed(&att_lbl, 20);
+        att_lbl.hide();
+        col.fixed(&bottom, 32);
+        col.end();
+        win.end();
+        setup_window(&mut win);
+
+        let sw = Rc::new(SendWin {
+            win: win.clone(),
+            list,
+            rows: Rc::new(RefCell::new(Vec::new())),
+            count,
+            buf,
+            seal,
+            att: Rc::new(RefCell::new(Vec::new())),
+            att_lbl,
+        });
+
+        // azioni
+        let eng = ctl.engine.clone();
+        refresh.set_callback(move |_| eng.refresh());
+        {
+            let ed2 = ed.clone();
+            emo.set_callback(move |_| emoji_picker(ed2.clone()));
+        }
+        attach.add_choice("File…|Cartella…|Rimuovi allegati");
+        {
+            let s = sw.clone();
+            let mut col = col.clone();
+            attach.set_callback(move |m| {
+                match m.value() {
+                    0 => {
+                        let mut d = dialog::NativeFileChooser::new(dialog::NativeFileChooserType::BrowseMultiFile);
+                        d.set_title("Allega file");
+                        d.show();
+                        s.add_attachments(&mut col, d.filenames());
+                    }
+                    1 => {
+                        let mut d = dialog::NativeFileChooser::new(dialog::NativeFileChooserType::BrowseDir);
+                        d.set_title("Allega cartella");
+                        d.show();
+                        s.add_attachments(&mut col, d.filenames());
+                    }
+                    _ => {
+                        s.att.borrow_mut().clear();
+                        s.add_attachments(&mut col, vec![]);
+                    }
+                }
+            });
+        }
+        let do_send: Rc<dyn Fn()> = {
+            let s = sw.clone();
+            let c = ctl.clone();
+            Rc::new(move || {
+                let users: Vec<(User, bool)> = {
+                    let rows = s.rows.borrow();
+                    s.list.selected_items().iter().filter_map(|&i| rows.get(i as usize - 1)).filter_map(|k| c.target(k)).collect()
+                };
+                let text = s.buf.text().trim_end().to_string();
+                let att = s.att.borrow().clone();
+                if users.is_empty() {
+                    dialog::alert_default("Seleziona almeno un destinatario.");
+                    return;
+                }
+                if text.trim().is_empty() && att.is_empty() {
+                    return;
+                }
+                c.send_targets(&users, &text, s.seal.value(), &att);
+                let mut w = s.win.clone();
+                w.do_callback();
+            })
+        };
+        {
+            let f = do_send.clone();
+            send.set_callback(move |_| f());
+        }
+        {
+            let f = do_send.clone();
+            ed.handle(move |_, ev| {
+                if ev == Event::KeyDown
+                    && matches!(app::event_key(), Key::Enter | Key::KPEnter)
+                    && app::event_state().contains(Shortcut::Ctrl)
+                {
+                    f();
+                    return true;
+                }
+                false
+            });
+        }
+        // trascina file nella finestra
+        {
+            let s = sw.clone();
+            let mut col = col.clone();
+            let mut w = win.clone();
+            w.handle(move |_, ev| match ev {
+                Event::DndEnter | Event::DndDrag | Event::DndRelease => true,
+                Event::Paste => {
+                    let paths: Vec<PathBuf> = app::event_text()
+                        .lines()
+                        .map(|l| l.trim().trim_start_matches("file://"))
+                        .filter(|l| !l.is_empty())
+                        .map(|l| PathBuf::from(percent_decode(l)))
+                        .filter(|p| p.exists())
+                        .collect();
+                    if paths.is_empty() {
+                        false
+                    } else {
+                        s.add_attachments(&mut col, paths);
+                        true
+                    }
+                }
+                _ => false,
+            });
+        }
+        // menu col tasto destro sulla lista utenti
+        {
+            let (s, c) = (sw.clone(), ctl.clone());
+            let mut l = sw.list.clone();
+            l.handle(move |l, ev| {
+                if ev == Event::Push && app::event_mouse_button() == app::MouseButton::Right {
+                    // seleziona la riga sotto il mouse se non è già selezionata
+                    let menu = fltk::menu::MenuItem::new(&["Modifica Tel…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)"]);
+                    if let Some(item) = menu.popup(app::event_x(), app::event_y()) {
+                        let targets: Vec<(User, bool)> = {
+                            let rows = s.rows.borrow();
+                            l.selected_items().iter().filter_map(|&i| rows.get(i as usize - 1)).filter_map(|k| c.target(k)).collect()
+                        };
+                        let sel: Vec<User> = targets.iter().filter(|t| t.1).map(|t| t.0.clone()).collect();
+                        let all: Vec<User> = targets.iter().map(|t| t.0.clone()).collect();
+                        match item.label().unwrap_or_default().as_str() {
+                            "Modifica Tel…" => {
+                                if let Some(u) = all.first() {
+                                    let cur = config::tel_get(&u.book_key());
+                                    if let Some(v) = dialog::input_default(&format!("Tel di {} (salvato solo su questo computer):", u.name()), &cur) {
+                                        config::tel_set(&u.book_key(), &v);
+                                        s.reload(&c);
+                                    }
+                                } else {
+                                    dialog::alert_default("Seleziona prima un utente.");
+                                }
+                            }
+                            "Aggiorna elenco" => c.engine.refresh(),
+                            "Messaggio di assenza…" => sel.iter().for_each(|u| c.engine.request_absence(u)),
+                            "Togli dalla lista (se non in linea)" => {
+                                for t in targets.iter().filter(|t| !t.1) {
+                                    config::known_remove(&t.0.book_key());
+                                }
+                                s.reload(&c);
+                            }
+                            _ => sel.iter().for_each(|u| c.engine.request_version(u)),
+                        }
+                    }
+                    return true;
+                }
+                false
+            });
+        }
+        sw.reload(ctl);
+        {
+            let mut l = sw.list.clone();
+            let rows = sw.rows.borrow();
+            for (i, a) in rows.iter().enumerate() {
+                if select.contains(a) {
+                    l.select(i as i32 + 1);
+                    l.middle_line(i as i32 + 1);
+                }
+            }
+        }
+        if !text.is_empty() {
+            sw.buf.clone().set_text(text);
+            ed.set_insert_position(text.len() as i32);
+        }
+        win.show();
+        let _ = ed.take_focus();
+        sw
+    }
+
+    fn add_attachments(&self, col: &mut Flex, paths: Vec<PathBuf>) {
+        {
+            let mut a = self.att.borrow_mut();
+            for p in paths {
+                if !a.contains(&p) {
+                    a.push(p);
+                }
+            }
+        }
+        let a = self.att.borrow();
+        let mut f = self.att_lbl.clone();
+        if a.is_empty() {
+            f.set_label("");
+            f.hide();
+        } else {
+            f.show();
+            let names: Vec<String> = a
+                .iter()
+                .map(|p| {
+                    let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if p.is_dir() { format!("{n}/") } else { n }
+                })
+                .collect();
+            f.set_label(&lbl(&format!("Allegati: {}", names.join(",  "))));
+            col.fixed(&f, 20);
+        }
+        col.layout();
+        self.win.clone().redraw();
+    }
+
+    pub fn reload(&self, ctl: &Ctl) {
+        let mut list = self.list.clone();
+        let sel: Vec<String> = {
+            let rows = self.rows.borrow();
+            list.selected_items().iter().filter_map(|&i| rows.get(i as usize - 1).cloned()).collect()
+        };
+        let mut users = ctl.targets();
+        users.sort_by(|a, b| {
+            (!a.1, a.0.group.to_lowercase(), a.0.name().to_lowercase()).cmp(&(!b.1, b.0.group.to_lowercase(), b.0.name().to_lowercase()))
+        });
+        let port = ctl.engine.port();
+        list.clear();
+        let mut rows = self.rows.borrow_mut();
+        rows.clear();
+        for (u, online) in &users {
+            let ip = if !*online {
+                String::new()
+            } else if u.addr.port() == port {
+                u.addr.ip().to_string()
+            } else {
+                u.addr.to_string()
+            };
+            let name = if !*online {
+                format!("{} (non in linea)", u.name())
+            } else if u.absent() {
+                format!("{} (assente)", u.name())
+            } else {
+                u.name().to_string()
+            };
+            let tel = config::tel_get(&u.book_key());
+            // grigio per chi non è in linea (\u{1}C8 = colore "inattivo")
+            let g = if *online { "" } else { "\u{1}C8" };
+            list.add(&format!("{g}{name}\t{g}{}\t{g}{tel}\t{g}{}\t{g}{ip}", u.group, u.host));
+            rows.push(u.book_key());
+            if sel.contains(&u.book_key()) {
+                list.select(rows.len() as i32);
+            }
+        }
+        let mut c = self.count.clone();
+        c.set_label(&users.iter().filter(|u| u.1).count().to_string());
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() + 0 && i + 2 <= b.len() - 1 {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+// ====================================================== finestra ricevuta
+pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
+    let mut win = Window::default().with_size(420, 320).with_label("Messaggio ricevuto").center_screen();
+    win.make_resizable(true);
+    let mut col = Flex::default_fill().column();
+    col.set_margin(6);
+    col.set_pad(4);
+
+    let kind = if m.auto_reply() {
+        "Risposta automatica da"
+    } else if m.command & p::BROADCASTOPT != 0 {
+        "Messaggio a tutti da"
+    } else if m.multi() {
+        "Messaggio di gruppo da"
+    } else {
+        "Messaggio da"
+    };
+    let s = &m.sender;
+    let detail: Vec<&str> = [s.group.as_str(), s.host.as_str()].into_iter().filter(|x| !x.is_empty()).collect();
+    let mut h1 = Frame::default().with_label(&lbl(&format!("{kind}  {}{}", s.name(), if detail.is_empty() { String::new() } else { format!("  ({})", detail.join("/")) })));
+    h1.set_align(Align::Inside | Align::Left);
+    h1.set_label_font(Font::HelveticaBold);
+    let enc = if m.encrypted { "    [cifrato]" } else { "" };
+    let mut h2 = Frame::default().with_label(&lbl(&format!("{}{enc}", time_label(m.received_at))));
+    h2.set_align(Align::Inside | Align::Left);
+    h2.set_label_size(12);
+    col.fixed(&h1, 20);
+    col.fixed(&h2, 18);
+
+    let buf = TextBuffer::default();
+    let mut body = Flex::default().column();
+    let rv = crate::rich::RichView::new();
+    let mut td = rv.scroll.clone();
+    let mut open = Button::default().with_label("Apri\n(messaggio sigillato)");
+    open.set_label_size(16);
+    open.set_label_font(Font::HelveticaBold);
+    body.end();
+    let _ = &buf;
+    if m.sealed() {
+        td.hide();
+    } else {
+        open.hide();
+        rv.clone().set_text(&m.text);
+    }
+
+    // allegati
+    let mut files = Pack::default();
+    files.set_type(PackType::Vertical);
+    files.set_spacing(2);
+    for f in &m.files {
+        let label = if f.is_dir() { format!("Cartella:  {}/", f.name) } else { format!("File:  {}   ({})", f.name, human(f.size)) };
+        let mut b = Button::default().with_size(0, 26).with_label(&lbl(&label));
+        b.set_align(Align::Inside | Align::Left);
+        b.set_tooltip("Salva…");
+        let c = ctl.clone();
+        let msg = m.clone();
+        let info = f.clone();
+        b.set_callback(move |b| save_file(&c, &msg, &info, b));
+    }
+    files.end();
+    col.fixed(&files, (m.files.len() as i32 * 28).max(1));
+    if m.sealed() || m.files.is_empty() {
+        files.hide();
+    }
+
+    let mut bottom = Flex::default().row();
+    let mut close = Button::default().with_label("Chiudi");
+    Frame::default();
+    let mut reply = ReturnButton::default().with_label("Rispondi");
+    let mut quote = CheckButton::default().with_label("Cita");
+    quote.set_value(ctl.cfg.borrow().quote);
+    bottom.fixed(&close, 90);
+    bottom.fixed(&reply, 110);
+    bottom.fixed(&quote, 60);
+    bottom.end();
+    col.fixed(&bottom, 30);
+    col.end();
+    win.end();
+    setup_window(&mut win);
+
+    let opened = Rc::new(RefCell::new(!m.sealed()));
+    let do_open: Rc<dyn Fn()> = {
+        let (td, open, buf, opened, c, msg) = (td.clone(), open.clone(), rv.clone(), opened.clone(), ctl.clone(), m.clone());
+        let (mut col, files) = (col.clone(), files.clone());
+        Rc::new(move || {
+            if *opened.borrow() {
+                return;
+            }
+            *opened.borrow_mut() = true;
+            let (mut open, mut buf, mut td, mut col) = (open.clone(), buf.clone(), td.clone(), col.clone());
+            open.hide();
+            buf.set_text(&msg.text);
+            td.show();
+            if !msg.files.is_empty() {
+                let mut f = files.clone();
+                f.show();
+            }
+            col.layout();
+            c.engine.mark_read(&msg);
+        })
+    };
+    {
+        let f = do_open.clone();
+        open.set_callback(move |_| f());
+    }
+    {
+        let mut w = win.clone();
+        close.set_callback(move |_| w.do_callback());
+    }
+    {
+        let (c, msg, f, mut w) = (ctl.clone(), m.clone(), do_open.clone(), win.clone());
+        reply.set_callback(move |_| {
+            f();
+            let q = if quote.value() && !msg.text.trim().is_empty() {
+                msg.text.trim_end().lines().map(|l| format!("> {l}\n")).collect::<String>()
+            } else {
+                String::new()
+            };
+            w.do_callback();
+            c.open_send(&[msg.sender.book_key()], &q);
+        });
+    }
+    win.show();
+    if m.sealed() {
+        let _ = open.take_focus();
+    } else {
+        let _ = reply.take_focus();
+    }
+}
+
+fn save_file(ctl: &Rc<Ctl>, m: &Message, info: &p::FileInfo, b: &mut Button) {
+    let mut d = dialog::NativeFileChooser::new(dialog::NativeFileChooserType::BrowseDir);
+    d.set_title(&format!("Salva «{}» nella cartella…", info.name));
+    let _ = d.set_directory(&ctl.cfg.borrow().download_dir);
+    d.show();
+    let Some(dest) = d.filenames().into_iter().next() else { return };
+    ctl.cfg.borrow_mut().download_dir = dest.to_string_lossy().into_owned();
+    let eng = ctl.engine.clone();
+    let (m, info) = (m.clone(), info.clone());
+    let mut b = b.clone();
+    b.deactivate();
+    let orig = b.label();
+    let n_files = m.files.len();
+    let done = ctl.downloaded.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    std::thread::spawn(move || {
+        let mut last = std::time::Instant::now();
+        let mut prog = |got: u64, tot: u64, _name: &str| {
+            if last.elapsed().as_millis() > 150 {
+                last = std::time::Instant::now();
+                let t = if tot > 0 { format!("{}%", got * 100 / tot) } else { human(got) };
+                if !b.was_deleted() {
+                    b.set_label(&format!("{orig}   ... {t}"));
+                }
+                app::awake();
+            }
+        };
+        let res = eng.download(&m, &info, &dest, &mut prog, &cancel);
+        match res {
+            Ok(path) if !b.was_deleted() => {
+                b.set_label(&format!("{orig}   - salvato, clic per aprire"));
+                b.set_tooltip(&path.to_string_lossy());
+                let pth = path.clone();
+                b.set_callback(move |_| open_path(&pth));
+                b.activate();
+                let all = {
+                    let mut d = done.lock().unwrap();
+                    let e = d.entry(m.packet_no).or_insert(0);
+                    *e += 1;
+                    *e >= n_files
+                };
+                if all {
+                    eng.release_files(&m);
+                }
+            }
+            Ok(_) => {
+                eng.release_files(&m);
+            }
+            Err(e) if !b.was_deleted() => {
+                b.set_label(&format!("{orig}   - errore: {e}"));
+                b.activate();
+            }
+            Err(_) => {}
+        }
+        app::awake();
+    });
+}
+
+fn open_path(p: &Path) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(p).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(p).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(p).spawn();
+}
+
+// ============================================================ impostazioni
+fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
+    let cfg = ctl.cfg.borrow().clone();
+    let mut win = Window::default().with_size(470, 500).with_label("Impostazioni di POPMSG").center_screen();
+    let mut col = Flex::default_fill().column();
+    col.set_margin(10);
+    col.set_pad(6);
+    let row = |label: &str, value: &str, col: &mut Flex| -> Input {
+        let mut r = Flex::default().row();
+        let l = Frame::default().with_label(label).with_align(Align::Inside | Align::Left);
+        let mut i = Input::default();
+        i.set_value(value);
+        r.fixed(&l, 150);
+        r.end();
+        col.fixed(&r, 26);
+        i
+    };
+    let nick = row("Nome visualizzato:", &cfg.nick, &mut col);
+    let group = row("Gruppo:", &cfg.group, &mut col);
+    let dl = row("Cartella per i file:", &cfg.download_dir, &mut col);
+    let extra = row("Indirizzi aggiuntivi:", &cfg.extra.join(", "), &mut col);
+    let port = row("Porta (riavvio):", &cfg.port.to_string(), &mut col);
+    let check = |label: &str, v: bool, col: &mut Flex| -> CheckButton {
+        let mut c = CheckButton::default().with_label(label);
+        c.set_value(v);
+        col.fixed(&c, 22);
+        c
+    };
+    let popup = check("Apri subito la finestra quando arriva un messaggio", cfg.popup, &mut col);
+    let sound = check("Suono alla ricezione", cfg.sound, &mut col);
+    let quote = check("Cita il messaggio quando rispondi", cfg.quote, &mut col);
+    let seal = check("Sigilla i messaggi per impostazione predefinita", cfg.seal, &mut col);
+    let enc = check("Cifra i messaggi (RSA 2048 + AES 256)", cfg.encryption, &mut col);
+    let log = check("Registra i messaggi su file", cfg.log_enabled, &mut col);
+    let auto = check("Avvia POPMSG all'accesso a Windows", config::autostart_enabled(), &mut col);
+    if !cfg!(windows) {
+        let mut a = auto.clone();
+        a.hide();
+    }
+    let fp = ctl.engine.fingerprint().unwrap_or_else(|| "-".into());
+    let mut f = Frame::default().with_label(&format!("Impronta della tua chiave: {fp}\nRegistro: {}", lbl(&cfg.log_path)));
+    f.set_align(Align::Inside | Align::Left | Align::Wrap);
+    f.set_label_size(11);
+    let mut b = Flex::default().row();
+    Frame::default();
+    let mut cancel = Button::default().with_label("Annulla");
+    let mut ok = ReturnButton::default().with_label("OK");
+    b.fixed(&cancel, 90);
+    b.fixed(&ok, 90);
+    b.end();
+    col.fixed(&b, 30);
+    col.end();
+    win.end();
+    win.set_icon(icon());
+    win.make_modal(true);
+    let result = Rc::new(RefCell::new(false));
+    {
+        let mut w = win.clone();
+        cancel.set_callback(move |_| w.hide());
+    }
+    {
+        let (mut w, r) = (win.clone(), result.clone());
+        ok.set_callback(move |_| {
+            *r.borrow_mut() = true;
+            w.hide();
+        });
+    }
+    win.show();
+    while win.shown() {
+        app::wait();
+    }
+    if !*result.borrow() {
+        return false;
+    }
+    let mut c = ctl.cfg.borrow_mut();
+    c.nick = nick.value().trim().to_string();
+    c.group = group.value().trim().to_string();
+    c.download_dir = dl.value().trim().to_string();
+    c.extra = extra.value().split([',', ';', ' ']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if let Ok(pv) = port.value().trim().parse::<u16>() {
+        c.port = pv;
+    }
+    c.popup = popup.value();
+    c.sound = sound.value();
+    c.quote = quote.value();
+    c.seal = seal.value();
+    c.encryption = enc.value();
+    c.log_enabled = log.value();
+    if cfg!(windows) && auto.value() != config::autostart_enabled() {
+        config::set_autostart(auto.value());
+    }
+    c.save();
+    true
+}
+
+fn log_viewer(path: &str) {
+    let mut win = Window::default().with_size(640, 520).with_label("Registro messaggi").center_screen();
+    win.make_resizable(true);
+    let mut col = Flex::default_fill().column();
+    col.set_margin(6);
+    let mut top = Flex::default().row();
+    let search = Input::default();
+    let mut find = ReturnButton::default().with_label("Trova");
+    top.fixed(&find, 80);
+    top.end();
+    col.fixed(&top, 28);
+    let mut buf = TextBuffer::default();
+    let mut td = TextDisplay::default();
+    td.set_buffer(buf.clone());
+    td.wrap_mode(WrapMode::AtBounds, 0);
+    td.set_text_size(13);
+    col.end();
+    win.end();
+    setup_window(&mut win);
+    buf.set_text(&std::fs::read_to_string(path).unwrap_or_else(|_| "(Il registro è vuoto.)".into()));
+    let len = buf.length();
+    td.set_insert_position(len);
+    td.show_insert_position();
+    {
+        let (buf, mut td) = (buf.clone(), td.clone());
+        find.set_callback(move |_| {
+            let q = search.value();
+            if q.is_empty() {
+                return;
+            }
+            let start = td.insert_position();
+            let pos = buf.search_backward(start - 1, &q, false).or_else(|| buf.search_backward(buf.length(), &q, false));
+            if let Some(pos) = pos {
+                let mut b = buf.clone();
+                b.select(pos, pos + q.len() as i32);
+                td.set_insert_position(pos);
+                td.show_insert_position();
+            }
+        });
+    }
+    win.show();
+}
+
+// ============================================================ controllore
+pub struct Ctl {
+    pub engine: Engine,
+    pub cfg: RefCell<Config>,
+    send_wins: RefCell<Vec<Rc<SendWin>>>,
+    sent: RefCell<HashMap<u64, (User, String, bool, Vec<PathBuf>)>>,
+    unread: RefCell<Vec<Message>>,
+    pub tray: RefCell<Option<Tray>>,
+    absence_sel: RefCell<Option<usize>>,
+    downloaded: Arc<std::sync::Mutex<HashMap<u64, usize>>>,
+    inflight: RefCell<HashMap<u64, u64>>,
+}
+
+impl Ctl {
+    pub fn new(engine: Engine, cfg: Config) -> Rc<Ctl> {
+        Rc::new(Ctl {
+            engine,
+            cfg: RefCell::new(cfg),
+            send_wins: RefCell::new(Vec::new()),
+            sent: RefCell::new(HashMap::new()),
+            unread: RefCell::new(Vec::new()),
+            tray: RefCell::new(None),
+            absence_sel: RefCell::new(None),
+            downloaded: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            inflight: RefCell::new(HashMap::new()),
+        })
+    }
+
+    pub fn any_window(&self) -> bool {
+        app::windows().map(|w| w.iter().any(|w| w.shown())).unwrap_or(false)
+    }
+
+    pub fn open_send(self: &Rc<Self>, select: &[String], text: &str) {
+        let w = SendWin::new(self, select, text);
+        self.send_wins.borrow_mut().retain(|s| !s.win.was_deleted() && s.win.shown());
+        self.send_wins.borrow_mut().push(w);
+    }
+
+    pub fn users_changed(&self) {
+        let online = self.engine.users();
+        config::known_update(
+            &online
+                .iter()
+                .map(|u| config::Known {
+                    key: u.book_key(),
+                    login: u.login.clone(),
+                    host: u.host.clone(),
+                    nick: u.nick.trim_end_matches(" [Assente]").to_string(),
+                    group: u.group.clone(),
+                    addr: u.addr.to_string(),
+                })
+                .collect::<Vec<_>>(),
+        );
+        self.flush_outbox(&online);
+        self.send_wins.borrow_mut().retain(|s| !s.win.was_deleted() && s.win.shown());
+        for s in self.send_wins.borrow().iter() {
+            s.reload(self);
+        }
+    }
+
+    /// Utenti in linea più quelli visti in passato (non in linea).
+    pub fn targets(&self) -> Vec<(User, bool)> {
+        let online = self.engine.users();
+        let keys: std::collections::HashSet<String> = online.iter().map(|u| u.book_key()).collect();
+        let mut out: Vec<(User, bool)> = online.into_iter().map(|u| (u, true)).collect();
+        for k in config::known_all() {
+            if keys.contains(&k.key) {
+                continue;
+            }
+            let addr = k.addr.parse().unwrap_or_else(|_| Addr::new(std::net::Ipv4Addr::UNSPECIFIED, 0));
+            out.push((User { addr, login: k.login, host: k.host, nick: k.nick, group: k.group, command: 0 }, false));
+        }
+        out
+    }
+
+    pub fn target(&self, key: &str) -> Option<(User, bool)> {
+        self.targets().into_iter().find(|t| t.0.book_key() == key)
+    }
+
+    pub fn send_targets(&self, targets: &[(User, bool)], text: &str, sealed: bool, att: &[PathBuf]) {
+        let online: Vec<User> = targets.iter().filter(|t| t.1).map(|t| t.0.clone()).collect();
+        if !online.is_empty() {
+            self.send(&online, text, sealed, att);
+        }
+        let offline: Vec<&User> = targets.iter().filter(|t| !t.1).map(|t| &t.0).collect();
+        if offline.is_empty() {
+            return;
+        }
+        let files: Vec<String> = att.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        for u in &offline {
+            config::outbox_add(&u.book_key(), u.name(), text, sealed, &files);
+        }
+        let names: Vec<&str> = offline.iter().map(|u| u.name()).collect();
+        notice(
+            "POPMSG",
+            &format!(
+                "{} non {} in linea.\nIl messaggio resta in attesa su questo computer e verrà consegnato appena {} POPMSG (anche se nel frattempo chiudi e riapri il programma).",
+                names.join(", "),
+                if names.len() > 1 { "sono" } else { "è" },
+                if names.len() > 1 { "apriranno" } else { "aprirà" }
+            ),
+        );
+        let cfg = self.cfg.borrow();
+        if cfg.log_enabled {
+            config::write_log(&cfg.log_path, "A", &names.join(", "), text, &["in attesa"], &[]);
+        }
+    }
+
+    fn flush_outbox(&self, online: &[User]) {
+        for q in config::outbox_all() {
+            if self.inflight.borrow().values().any(|id| *id == q.id) {
+                continue;
+            }
+            let Some(u) = online.iter().find(|u| u.book_key() == q.key) else { continue };
+            let text = format!("[Messaggio scritto il {} mentre non eri in linea]\n{}", q.written, q.text);
+            let files: Vec<PathBuf> = q.files.iter().map(PathBuf::from).filter(|p| p.exists()).collect();
+            let nos = self.engine.send_message(std::slice::from_ref(u), &text, q.sealed, &files);
+            for no in nos {
+                self.inflight.borrow_mut().insert(no, q.id);
+                self.sent.borrow_mut().insert(no, (u.clone(), text.clone(), q.sealed, files.clone()));
+            }
+        }
+    }
+
+    pub fn on_delivered(&self, no: u64) {
+        if let Some(id) = self.inflight.borrow_mut().remove(&no) {
+            config::outbox_remove(id);
+        }
+    }
+
+    pub fn send(&self, users: &[User], text: &str, sealed: bool, att: &[PathBuf]) {
+        let nos = self.engine.send_message(users, text, sealed, att);
+        let mut sent = self.sent.borrow_mut();
+        for (no, u) in nos.iter().zip(users) {
+            sent.insert(*no, (u.clone(), text.to_string(), sealed, att.to_vec()));
+        }
+        let cfg = self.cfg.borrow();
+        if cfg.log_enabled {
+            let who: Vec<String> = users.iter().map(|u| format!("{} ({}/{})", u.name(), u.group, u.host)).collect();
+            let mut flags = vec![];
+            if sealed {
+                flags.push("sigillato");
+            }
+            if users.iter().all(|u| self.engine.will_encrypt(u)) {
+                flags.push("cifrato");
+            }
+            let files: Vec<String> = att.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
+            config::write_log(&cfg.log_path, "A", &who.join(", "), text, &flags, &files);
+        }
+    }
+
+    pub fn on_message(self: &Rc<Self>, m: Message) {
+        let (log, path, sound, popup) = {
+            let c = self.cfg.borrow();
+            (c.log_enabled, c.log_path.clone(), c.sound, c.popup)
+        };
+        if log {
+            let s = &m.sender;
+            let mut flags = vec![];
+            if m.sealed() {
+                flags.push("sigillato");
+            }
+            if m.encrypted {
+                flags.push("cifrato");
+            }
+            if m.multi() {
+                flags.push("multiplo");
+            }
+            let files: Vec<String> = m.files.iter().map(|f| f.name.clone()).collect();
+            config::write_log(&path, "Da", &format!("{} ({}/{})", s.name(), s.group, s.host), &m.text, &flags, &files);
+        }
+        if sound {
+            dialog::beep(dialog::BeepType::Message);
+        }
+        if popup || self.tray.borrow().is_none() {
+            recv_window(self, m);
+        } else {
+            self.unread.borrow_mut().push(m);
+            self.update_tray();
+        }
+    }
+
+    pub fn show_unread(self: &Rc<Self>) -> bool {
+        let list: Vec<Message> = self.unread.borrow_mut().drain(..).collect();
+        let any = !list.is_empty();
+        for m in list {
+            recv_window(self, m);
+        }
+        self.update_tray();
+        any
+    }
+
+    pub fn on_opened(&self, no: u64, name: &str) {
+        if self.sent.borrow().contains_key(&no) {
+            notice("POPMSG", &format!("Il messaggio sigillato è stato aperto da {name}.\n({})", chrono::Local::now().format("%H:%M:%S")));
+        }
+    }
+
+    pub fn on_failed(&self, no: u64) {
+        if self.inflight.borrow_mut().remove(&no).is_some() {
+            return; // resta in attesa: riproveremo quando ricompare
+        }
+        let Some((u, text, sealed, att)) = self.sent.borrow().get(&no).cloned() else { return };
+        let r = dialog::choice2_default(
+            &format!("Il messaggio a {} non è stato consegnato.\nVuoi riprovare ora o lasciarlo in attesa finché torna in linea?", u.name()),
+            "Annulla",
+            "Riprova",
+            "In attesa",
+        );
+        if r == Some(1) {
+            let target = self.engine.user(&u.addr).unwrap_or(u);
+            self.send(&[target], &text, sealed, &att);
+        } else if r == Some(2) {
+            let files: Vec<String> = att.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            config::outbox_add(&u.book_key(), u.name(), &text, sealed, &files);
+        }
+    }
+
+    pub fn tray_cmd(self: &Rc<Self>, c: TrayCmd) {
+        match c {
+            TrayCmd::Open => self.open_send(&[], ""),
+            TrayCmd::Present => self.set_absence(None, None),
+            TrayCmd::Absence(i) => self.set_absence(Some(i), Some(ABSENCE_PRESETS[i].1.to_string())),
+            TrayCmd::CustomAbsence => {
+                let cur = self.cfg.borrow().absence_text.clone();
+                match dialog::input_default("Messaggio di risposta automatica:", &cur) {
+                    Some(t) if !t.trim().is_empty() => self.set_absence(Some(ABSENCE_PRESETS.len()), Some(t)),
+                    _ => self.update_tray(),
+                }
+            }
+            TrayCmd::Log => log_viewer(&self.cfg.borrow().log_path.clone()),
+            TrayCmd::Settings => {
+                let old = self.cfg.borrow().clone();
+                if settings_dialog(self) {
+                    let c = self.cfg.borrow().clone();
+                    self.engine.set_encryption(c.encryption);
+                    self.engine.set_identity(&c.nick, &c.group, c.extra.clone());
+                    if c.port != old.port {
+                        notice("POPMSG", "La nuova porta sarà usata al prossimo avvio.");
+                    }
+                    self.users_changed();
+                }
+            }
+            TrayCmd::About => notice(
+                "Informazioni su POPMSG",
+                &format!(
+                    "POPMSG {}\n\nMessaggistica per reti locali, senza server.\nCompatibile con il protocollo di IP Messenger (porta 2425).\nCifratura RSA 2048 + AES 256.",
+                    crate::net::APP_VERSION
+                ),
+            ),
+            TrayCmd::Quit => self.quit(),
+        }
+    }
+
+    fn set_absence(&self, sel: Option<usize>, text: Option<String>) {
+        if let Some(t) = &text {
+            let mut c = self.cfg.borrow_mut();
+            c.absence_text = t.clone();
+            c.save();
+        }
+        self.engine.set_absence(sel.is_some(), text.as_deref());
+        *self.absence_sel.borrow_mut() = sel;
+        self.update_tray();
+    }
+
+    pub fn update_tray(&self) {
+        if let Some(t) = self.tray.borrow().as_ref() {
+            let s = if !self.unread.borrow().is_empty() {
+                State::Unread
+            } else if self.engine.absent() {
+                State::Away
+            } else {
+                State::Normal
+            };
+            t.set_state(s, *self.absence_sel.borrow());
+        }
+    }
+
+    pub fn quit(&self) {
+        self.cfg.borrow().save();
+        self.engine.stop();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::process::exit(0);
+    }
+}
+
+pub fn handle_net(ctl: &Rc<Ctl>, ev: crate::net::Event) {
+    use crate::net::Event as E;
+    match ev {
+        E::UsersChanged => ctl.users_changed(),
+        E::Message(m) => ctl.on_message(*m),
+        E::Delivered(no) => ctl.on_delivered(no),
+        E::Opened(no, name) => ctl.on_opened(no, &name),
+        E::Failed(no, _) => ctl.on_failed(no),
+        E::AbsenceInfo(n, t) => notice(&format!("Assenza di {n}"), &t),
+        E::VersionInfo(n, t) => notice(&format!("Versione di {n}"), &t),
+        E::Error(e) => eprintln!("{e}"),
+    }
+}
+
+#[allow(dead_code)]
+pub fn start_tray(ctl: &Rc<Ctl>, tx: app::Sender<crate::Msg>) {
+    *ctl.tray.borrow_mut() = tray::start(tx);
+}

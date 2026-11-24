@@ -4,71 +4,61 @@ Messaggistica istantanea per la rete locale, **senza server**, nello stile di IP
 Parla il protocollo di IP Messenger (UDP/TCP porta 2425), quindi vede e scambia messaggi
 anche con i client IP Messenger originali presenti in rete.
 
-Funziona su **Windows**, **macOS** e **Linux**.
+Scritto in **Rust** con la libreria grafica **FLTK**: un solo eseguibile di circa 3,5 MB,
+nessuna installazione, circa **3 MB di memoria privata** (11-12 MB di RSS su Linux,
+librerie di sistema comprese). Funziona su **Windows**, **macOS** e **Linux**.
 
-| Invia messaggio | Messaggio ricevuto | Messaggio sigillato |
+| Messaggi ricevuti | Emoticon | Utenti non in linea |
 |---|---|---|
-| ![](docs/send.png) | ![](docs/recv.png) | ![](docs/sealed.png) |
+| ![](docs/ricezione.png) | ![](docs/emoticon.png) | ![](docs/in-attesa.png) |
 
 ## Funzioni
 
 - Scoperta automatica degli utenti in rete (broadcast UDP), con nome, gruppo, host e IP
-- Elenco utenti ordinabile, selezione multipla e per gruppo, pulsante **Aggiorna** (F5)
-- Invio con **Ctrl+Invio**, conferma di consegna e nuovo tentativo automatico
-- **Messaggi sigillati**: il destinatario deve premere *Apri* e tu ricevi l'avviso di lettura
-- **Rispondi** con citazione del messaggio originale
+- **Utenti non in linea** in grigio: si può scrivere anche a loro, il messaggio resta in attesa
+  sul proprio computer e viene consegnato appena il destinatario apre POPMSG
+- Colonna **Tel**: ognuno annota i numeri degli altri (tasto destro → *Modifica Tel…*),
+  salvati solo sul proprio computer
+- **Emoticon** a colori (pulsante 😊), disegnate come immagini: uguali su tutti i sistemi
+- **Cifratura** RSA 2048 + AES 256 compatibile con IP Messenger, automatica quando anche
+  l'altro la supporta; altrimenti il messaggio passa in chiaro
+- **Messaggi sigillati** con avviso di apertura al mittente
+- **Rispondi** con citazione, invio con **Ctrl+Invio**, conferma di consegna e nuovi tentativi
 - **Modalità assenza** con risposta automatica (preimpostate o personalizzata)
-- **Invio di file e cartelle** via TCP: trascina nella finestra o usa *Allega*
-- Icona nella barra di sistema, avviso con icona se la finestra non si apre da sola
-- Registro dei messaggi su file, con ricerca
+- **Invio di file e cartelle** via TCP (trascinandoli nella finestra o con *Allega*)
+- Icona nella barra di sistema, registro dei messaggi, avvio automatico con Windows
 - Indirizzi broadcast aggiuntivi per raggiungere altre sottoreti
-- Avvio automatico con Windows (opzionale)
-
-Non ancora supportata: la cifratura RSA/AES delle versioni recenti di IP Messenger
-(i messaggi con i client originali passano in chiaro, come con la cifratura disattivata).
 
 ## Scaricare
 
-Le versioni pronte si trovano nelle *Releases* del repository oppure negli *Artifacts*
-dell'ultima esecuzione di **Actions → Build**:
+Gli eseguibili si trovano negli *Artifacts* dell'ultima esecuzione di **Actions → Build**
+(o nelle *Releases*, se create con un tag `v*`):
 
-- `POPMSG-windows.zip` → `POPMSG.exe`, un solo file, non serve installare nulla
+- `POPMSG-windows.zip` → `POPMSG.exe`
 - `POPMSG-macos.zip` → `POPMSG.app` (al primo avvio: tasto destro → Apri)
-- `POPMSG-linux.tar.gz` → eseguibile `POPMSG`
+- `POPMSG-linux.tar.gz` → `POPMSG`
 
-Al primo avvio Windows può chiedere di consentire l'accesso alla rete: consenti almeno le reti private.
+Al primo avvio Windows può chiedere di consentire l'accesso alla rete: consenti le reti private.
 
-## Eseguire dai sorgenti
+## Dove salva i dati
 
-```bash
-python -m pip install -r requirements.txt
-python run.py
-```
+Nella cartella `%APPDATA%\POPMSG` (Windows), `~/Library/Application Support/POPMSG` (macOS)
+o `~/.config/popmsg` (Linux): impostazioni (`popmsg.ini`), chiave RSA personale (`key.pem`),
+rubrica dei numeri (`rubrica.ini`), utenti conosciuti (`utenti.txt`), messaggi in attesa
+(`in_attesa.txt`) e registro (`popmsg.log`).
 
-Opzione `--show` per aprire subito la finestra di invio.
-
-## Creare l'eseguibile
+## Compilare
 
 ```bash
-python -m pip install -r requirements-build.txt
-python build.py        # risultato in dist/
+cargo build --release       # eseguibile in target/release/
+cargo test --release        # protocollo, cifratura e prova completa tra tre istanze
 ```
 
-Per pubblicare una release basta creare un tag `v1.0.0` e fare push: GitHub Actions
-crea gli eseguibili per i tre sistemi e li allega alla release.
+Su Linux servono i pacchetti di sviluppo di X11, Xft, fontconfig e dbus
+(vedi `.github/workflows/build.yml`).
 
-## Test
+## Note
 
-```bash
-QT_QPA_PLATFORM=offscreen python tests/test_engine.py
-```
-
-Il test avvia due istanze sulla stessa macchina e verifica scoperta, messaggi sigillati con
-conferma di lettura, assenza, invio di file e cartelle e uscita.
-
-## Struttura
-
-- `popmsg/protocol.py`: costanti e formato dei pacchetti IP Messenger
-- `popmsg/engine.py`: rete (UDP presenza e messaggi, server TCP per i file, download)
-- `popmsg/ui/`: finestre (invio, ricezione, impostazioni, registro) e icone
-- `popmsg/app.py`: icona nella barra di sistema e coordinamento delle finestre
+- Le emoticon sono immagini tratte da Noto Emoji (licenza Apache 2.0).
+- Chi chiude POPMSG normalmente esce subito dalla lista degli altri; se il computer si spegne
+  di colpo, resta in lista finché qualcuno preme **Aggiorna**.
