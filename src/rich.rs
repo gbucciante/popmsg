@@ -14,7 +14,7 @@ use fltk::{
     prelude::*,
 };
 
-use crate::emoji::EMOJI_PNG;
+use crate::emoji::{BLOB, EMOJI};
 
 const EMO: i32 = 20;
 
@@ -22,11 +22,13 @@ thread_local! {
     static CACHE: RefCell<HashMap<usize, PngImage>> = RefCell::new(HashMap::new());
 }
 
+/// Immagine dell'emoticon `i` (indice in `emoji::EMOJI`) alla dimensione richiesta.
 pub fn emoji_image(i: usize, size: i32) -> Option<PngImage> {
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if !c.contains_key(&i) {
-            let img = PngImage::from_data(EMOJI_PNG[i].1).ok()?;
+            let (_, _, o, l) = *EMOJI.get(i)?;
+            let img = PngImage::from_data(&BLOB[o as usize..(o + l) as usize]).ok()?;
             c.insert(i, img);
         }
         let mut img = c.get(&i)?.clone();
@@ -35,8 +37,32 @@ pub fn emoji_image(i: usize, size: i32) -> Option<PngImage> {
     })
 }
 
+/// Indice di un'emoticon, se presente nel set.
+pub fn emoji_index(e: &str) -> Option<usize> {
+    let k = strip_vs(e);
+    index().get(&k.chars().next()?)?.iter().find(|(i, _)| strip_vs(EMOJI[*i].1) == k).map(|(i, _)| *i)
+}
+
 fn strip_vs(s: &str) -> String {
     s.chars().filter(|&c| c != '\u{FE0F}').collect()
+}
+
+/// primo carattere -> (indice, chiave senza FE0F), dalla più lunga alla più corta
+fn index() -> &'static HashMap<char, Vec<(usize, String)>> {
+    static IDX: std::sync::OnceLock<HashMap<char, Vec<(usize, String)>>> = std::sync::OnceLock::new();
+    IDX.get_or_init(|| {
+        let mut m: HashMap<char, Vec<(usize, String)>> = HashMap::new();
+        for (i, (_, e, _, _)) in EMOJI.iter().enumerate() {
+            let k = strip_vs(e);
+            if let Some(c) = k.chars().next() {
+                m.entry(c).or_default().push((i, k));
+            }
+        }
+        for v in m.values_mut() {
+            v.sort_by_key(|(_, k)| std::cmp::Reverse(k.chars().count()));
+        }
+        m
+    })
 }
 
 enum Tok {
@@ -66,16 +92,15 @@ fn match_at(rest: &str, k: &str) -> Option<usize> {
 }
 
 fn tokenize(text: &str) -> Vec<Tok> {
-    let keys: Vec<String> = EMOJI_PNG.iter().map(|(e, _)| strip_vs(e)).collect();
+    let idx = index();
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut rest = text;
     while !rest.is_empty() {
-        let best = keys
-            .iter()
-            .enumerate()
-            .filter_map(|(i, k)| match_at(rest, k).map(|e| (i, k.chars().count(), e)))
-            .max_by_key(|x| x.1);
+        let first = rest.chars().next().unwrap();
+        let best = idx
+            .get(&first)
+            .and_then(|v| v.iter().find_map(|(i, k)| match_at(rest, k).map(|e| (*i, 0, e))));
         if let Some((i, _, e)) = best {
             if !cur.is_empty() {
                 out.push(Tok::Text(std::mem::take(&mut cur)));
@@ -248,7 +273,8 @@ mod tests {
         let t = tokenize("ciao 😊 ok ❤️ fine❤\nx");
         let em: Vec<usize> = t.iter().filter_map(|t| if let Tok::Emoji(i) = t { Some(*i) } else { None }).collect();
         assert_eq!(em.len(), 3);
-        assert_eq!(EMOJI_PNG[em[0]].0, "😊");
+        assert_eq!(EMOJI[em[0]].1, "😊");
+        assert_eq!(emoji_index("❤️"), Some(em[1]));
         assert_eq!(em[1], em[2]);
     }
 }

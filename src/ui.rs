@@ -8,8 +8,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use fltk::{
-    app, browser::MultiBrowser, button::{Button, CheckButton, ReturnButton}, dialog, enums::{Align, Event, Font, FrameType, Key, Shortcut},
-    frame::Frame, group::{Flex, Pack, PackType}, input::Input, menu::MenuButton, prelude::*,
+    app, button::{Button, CheckButton, ReturnButton}, dialog, enums::{Align, Event, Font, FrameType, Key, Shortcut},
+    draw, frame::Frame, group::{Flex, Pack, PackType}, input::Input, menu::MenuButton, prelude::*,
     text::{TextBuffer, TextDisplay, TextEditor, WrapMode}, window::Window,
 };
 
@@ -17,13 +17,7 @@ use crate::config::{self, Config, ABSENCE_PRESETS};
 use crate::net::{Addr, Engine, Message, User};
 use crate::protocol as p;
 use crate::tray::{self, State, TrayCmd, Tray};
-
-pub const EMOJI: &[&str] = &[
-    "😊", "😀", "😂", "😉", "😍", "😘", "😎", "🤔", "😅", "😢", "😭", "😡",
-    "😮", "😴", "🙄", "😇", "👍", "👎", "👏", "🙏", "💪", "👋", "🤝", "✌️",
-    "❤️", "💔", "🎉", "🎂", "☕", "🍕", "🍺", "⭐", "🔥", "✅", "❌", "⚠️",
-    "📎", "📞", "📅", "⏰", "💡", "🚀",
-];
+use crate::usertable::{Row, UserTable};
 
 fn icon() -> Option<fltk::image::PngImage> {
     fltk::image::PngImage::from_data(include_bytes!("../assets/popmsg.png")).ok()
@@ -83,39 +77,140 @@ pub fn notice(title: &str, text: &str) {
     w.show();
 }
 
-fn emoji_picker(mut buf: TextEditor) {
-    let cols = 6;
-    let rows = EMOJI.len().div_ceil(cols) as i32;
-    let mut w = Window::default().with_size(cols as i32 * 40 + 8, rows * 36 + 8).with_label("Emoticon");
-    w.set_pos(app::event_x_root() - 20, app::event_y_root() - 20);
-    for (i, e) in EMOJI.iter().enumerate() {
-        let (r, c) = ((i / cols) as i32, (i % cols) as i32);
-        let mut b = Button::new(4 + c * 40, 4 + r * 36, 38, 34, None);
-        b.set_image(crate::rich::emoji_image(i, 24));
-        b.set_tooltip(e);
+/// Inserisce un'emoticon nel testo e la conta tra le più usate.
+fn put_emoji(ed: &mut TextEditor, e: &str) {
+    ed.insert(e);
+    let _ = ed.take_focus();
+    config::emoji_used(e);
+}
+
+/// Scelta delle emoticon: categorie in alto, griglia scorrevole sotto.
+fn emoji_picker(ed: TextEditor) {
+    use crate::emoji::{EMOJI, GROUPS};
+    const COLS_N: i32 = 10;
+    const CELL: i32 = 32;
+    let gw = COLS_N * CELL + 14;
+    let mut w = Window::default().with_size(gw + 8, 330).with_label("Emoticon");
+    w.set_pos(app::event_x_root() - gw / 2, app::event_y_root() - 340);
+    let mut col = Flex::default_fill().column();
+    col.set_margin(4);
+    col.set_pad(4);
+    let mut tabs = Flex::default().row();
+    tabs.set_pad(1);
+    let mut tab_btns = Vec::new();
+    for (g, name) in GROUPS.iter().enumerate() {
+        let first = EMOJI.iter().position(|x| x.0 as usize == g).unwrap_or(0);
+        let mut b = Button::default();
+        b.set_image(crate::rich::emoji_image(first, 22));
+        b.set_tooltip(name);
         b.set_frame(FrameType::FlatBox);
-        let mut ed = buf.clone();
-        let e = e.to_string();
-        b.set_callback(move |b| {
-            ed.insert(&e);
-            let _ = ed.take_focus();
-            if let Some(mut w) = b.window() {
-                w.hide();
+        b.set_down_frame(FrameType::DownBox);
+        tab_btns.push(b);
+    }
+    tabs.end();
+    col.fixed(&tabs, 30);
+    let mut title = Frame::default().with_label(GROUPS[0]);
+    title.set_align(Align::Inside | Align::Left);
+    title.set_label_size(12);
+    col.fixed(&title, 16);
+    let mut scroll = fltk::group::Scroll::default();
+    scroll.set_type(fltk::group::ScrollType::Vertical);
+    scroll.set_scrollbar_size(12);
+    scroll.set_color(fltk::enums::Color::White);
+    scroll.set_frame(FrameType::DownBox);
+    let mut canvas = Frame::default();
+    scroll.end();
+    col.end();
+    w.end();
+    // stato: gruppo corrente (indici delle emoticon) e cella sotto il mouse
+    let items: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+    let hover: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
+    let show_group = {
+        let (items, canvas, scroll, title) = (items.clone(), canvas.clone(), scroll.clone(), title.clone());
+        move |g: usize| {
+            let (mut canvas, mut scroll, mut title) = (canvas.clone(), scroll.clone(), title.clone());
+            *items.borrow_mut() = (0..EMOJI.len()).filter(|&i| EMOJI[i].0 as usize == g).collect();
+            let n = items.borrow().len() as i32;
+            let rows = (n + COLS_N - 1) / COLS_N;
+            scroll.scroll_to(0, 0);
+            canvas.resize(scroll.x() + 2, scroll.y() + 2, COLS_N * CELL, (rows * CELL).max(scroll.h() - 4));
+            title.set_label(GROUPS[g]);
+            scroll.redraw();
+        }
+    };
+    {
+        let (items, hover, scroll) = (items.clone(), hover.clone(), scroll.clone());
+        canvas.draw(move |f| {
+            let items = items.borrow();
+            let (top, bottom) = (scroll.y(), scroll.y() + scroll.h());
+            draw::push_clip(scroll.x() + 2, scroll.y() + 2, scroll.w() - 4, scroll.h() - 4);
+            for (k, &i) in items.iter().enumerate() {
+                let (r, c) = (k as i32 / COLS_N, k as i32 % COLS_N);
+                let (x, y) = (f.x() + c * CELL, f.y() + r * CELL);
+                if y + CELL < top || y > bottom {
+                    continue; // disegna solo le celle visibili
+                }
+                if *hover.borrow() == Some(k) {
+                    draw::draw_rect_fill(x, y, CELL, CELL, fltk::enums::Color::from_rgb(220, 232, 250));
+                }
+                if let Some(mut img) = crate::rich::emoji_image(i, 24) {
+                    img.draw(x + (CELL - 24) / 2, y + (CELL - 24) / 2, 24, 24);
+                }
+            }
+            draw::pop_clip();
+        });
+    }
+    {
+        let (items, hover) = (items.clone(), hover.clone());
+        let mut ed = ed.clone();
+        canvas.handle(move |f, ev| {
+            let cell = || {
+                let (c, r) = ((app::event_x() - f.x()) / CELL, (app::event_y() - f.y()) / CELL);
+                let k = (r * COLS_N + c) as usize;
+                (c >= 0 && c < COLS_N && app::event_x() >= f.x() && k < items.borrow().len()).then_some(k)
+            };
+            match ev {
+                Event::Enter => true,
+                Event::Move => {
+                    let k = cell();
+                    if k != *hover.borrow() {
+                        *hover.borrow_mut() = k;
+                        f.set_tooltip("");
+                        f.redraw();
+                    }
+                    true
+                }
+                Event::Leave => {
+                    *hover.borrow_mut() = None;
+                    f.redraw();
+                    true
+                }
+                Event::Push => {
+                    if let Some(k) = cell() {
+                        let e = EMOJI[items.borrow()[k]].1;
+                        put_emoji(&mut ed, e);
+                    }
+                    true
+                }
+                _ => false,
             }
         });
     }
-    w.end();
-    w.make_modal(false);
+    let show_group = Rc::new(show_group);
+    for (g, b) in tab_btns.iter_mut().enumerate() {
+        let f = show_group.clone();
+        b.set_callback(move |_| f(g));
+    }
+    w.make_resizable(false);
     setup_window(&mut w);
     w.show();
-    let _ = buf.take_focus();
+    show_group(0);
 }
 
 // ======================================================== finestra di invio
 pub struct SendWin {
     pub win: Window,
-    list: MultiBrowser,
-    rows: Rc<RefCell<Vec<String>>>,
+    list: UserTable,
     count: Frame,
     buf: TextBuffer,
     seal: CheckButton,
@@ -132,23 +227,7 @@ impl SendWin {
         col.set_pad(4);
 
         let mut top = Flex::default().row();
-        let mut left = Flex::default().column();
-        left.set_pad(0);
-        let mut head = fltk::browser::Browser::default();
-        head.set_column_char('\t');
-        head.set_column_widths(&[130, 105, 95, 85, 100]);
-        head.add("@bUtente\t@bGruppo\t@bTel\t@bHost\t@bIndirizzo IP");
-        head.set_frame(FrameType::FlatBox);
-        head.set_color(fltk::enums::Color::Background);
-        head.set_has_scrollbar(fltk::browser::BrowserScrollbar::None);
-        head.deactivate();
-        let mut list = MultiBrowser::default();
-        list.set_column_char('\t');
-        list.set_format_char('\u{1}');
-        list.set_has_scrollbar(fltk::browser::BrowserScrollbar::Vertical);
-        list.set_column_widths(&[130, 105, 95, 85, 100]);
-        left.fixed(&head, 20);
-        left.end();
+        let list = UserTable::new();
         let mut side = Flex::default().column();
         let mut l1 = Frame::default().with_label("Utenti");
         l1.set_align(Align::Inside | Align::Bottom);
@@ -171,6 +250,23 @@ impl SendWin {
         ed.set_text_size(14);
         ed.set_scrollbar_size(12);
 
+        // riga delle emoticon preferite (le più usate)
+        let mut favs = Flex::default().row();
+        favs.set_pad(1);
+        for e in config::favorites(14) {
+            let Some(i) = crate::rich::emoji_index(&e) else { continue };
+            let mut b = Button::default();
+            b.set_image(crate::rich::emoji_image(i, 20));
+            b.set_frame(FrameType::FlatBox);
+            b.set_down_frame(FrameType::DownBox);
+            b.set_tooltip("Emoticon preferita");
+            favs.fixed(&b, 28);
+            let mut ed = ed.clone();
+            b.set_callback(move |_| put_emoji(&mut ed, &e));
+        }
+        Frame::default();
+        favs.end();
+
         let mut att_lbl = Frame::default();
         att_lbl.set_align(Align::Inside | Align::Left);
         att_lbl.set_label_size(12);
@@ -180,7 +276,7 @@ impl SendWin {
         let mut groups = MenuButton::default().with_label("Gruppi");
         groups.set_tooltip("Seleziona, crea o elimina i tuoi gruppi di destinatari");
         let mut emo = Button::default();
-        emo.set_image(crate::rich::emoji_image(0, 20));
+        emo.set_image(crate::rich::emoji_index("😊").and_then(|i| crate::rich::emoji_image(i, 20)));
         emo.set_tooltip("Emoticon");
         let mut seal = CheckButton::default().with_label("Sigilla");
         seal.set_value(ctl.cfg.borrow().seal);
@@ -194,6 +290,7 @@ impl SendWin {
         bottom.fixed(&send, 120);
         bottom.end();
 
+        col.fixed(&favs, 26);
         col.fixed(&att_lbl, 20);
         att_lbl.hide();
         col.fixed(&bottom, 32);
@@ -204,7 +301,6 @@ impl SendWin {
         let sw = Rc::new(SendWin {
             win: win.clone(),
             list,
-            rows: Rc::new(RefCell::new(Vec::new())),
             count,
             buf,
             seal,
@@ -270,10 +366,7 @@ impl SendWin {
                 match act {
                     Some(GAct::Select(keys)) => s.select_keys(&c, &keys),
                     Some(GAct::Save) => {
-                        let keys: Vec<String> = {
-                            let rows = s.rows.borrow();
-                            s.list.selected_items().iter().filter_map(|&i| rows.get(i as usize - 1).cloned()).collect()
-                        };
+                        let keys = s.list.selected_keys();
                         if keys.is_empty() {
                             dialog::alert_default("Seleziona prima gli utenti da mettere nel gruppo.");
                         } else if let Some(name) = dialog::input_default(&format!("Nome del nuovo gruppo ({} utenti):", keys.len()), "") {
@@ -320,10 +413,7 @@ impl SendWin {
             let s = sw.clone();
             let c = ctl.clone();
             Rc::new(move || {
-                let users: Vec<(User, bool)> = {
-                    let rows = s.rows.borrow();
-                    s.list.selected_items().iter().filter_map(|&i| rows.get(i as usize - 1)).filter_map(|k| c.target(k)).collect()
-                };
+                let users: Vec<(User, bool)> = s.list.selected_keys().iter().filter_map(|k| c.target(k)).collect();
                 let text = s.buf.text().trim_end().to_string();
                 let att = s.att.borrow().clone();
                 if users.is_empty() {
@@ -382,61 +472,44 @@ impl SendWin {
         }
         // menu col tasto destro sulla lista utenti
         {
-            let (s, c) = (sw.clone(), ctl.clone());
-            let mut l = sw.list.clone();
-            l.handle(move |l, ev| {
-                if ev == Event::Push && app::event_mouse_button() == app::MouseButton::Right {
-                    // seleziona la riga sotto il mouse se non è già selezionata
-                    let menu = fltk::menu::MenuItem::new(&["Modifica Tel…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Informazioni su POPMSG"]);
-                    if let Some(item) = menu.popup(app::event_x(), app::event_y()) {
-                        let targets: Vec<(User, bool)> = {
-                            let rows = s.rows.borrow();
-                            l.selected_items().iter().filter_map(|&i| rows.get(i as usize - 1)).filter_map(|k| c.target(k)).collect()
-                        };
-                        let sel: Vec<User> = targets.iter().filter(|t| t.1).map(|t| t.0.clone()).collect();
-                        let all: Vec<User> = targets.iter().map(|t| t.0.clone()).collect();
-                        match item.label().unwrap_or_default().as_str() {
-                            "Modifica Tel…" => {
-                                if let Some(u) = all.first() {
-                                    let cur = config::tel_get(&u.book_key());
-                                    if let Some(v) = dialog::input_default(&format!("Tel di {} (salvato solo su questo computer):", u.name()), &cur) {
-                                        config::tel_set(&u.book_key(), &v);
-                                        s.reload(&c);
-                                    }
-                                } else {
-                                    dialog::alert_default("Seleziona prima un utente.");
+            let (s, c) = (Rc::downgrade(&sw), ctl.clone());
+            sw.list.set_menu(move || {
+                let Some(s) = s.upgrade() else { return };
+                let menu = fltk::menu::MenuItem::new(&["Modifica Tel…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Informazioni su POPMSG"]);
+                if let Some(item) = menu.popup(app::event_x(), app::event_y()) {
+                    let targets: Vec<(User, bool)> = s.list.selected_keys().iter().filter_map(|k| c.target(k)).collect();
+                    let sel: Vec<User> = targets.iter().filter(|t| t.1).map(|t| t.0.clone()).collect();
+                    let all: Vec<User> = targets.iter().map(|t| t.0.clone()).collect();
+                    match item.label().unwrap_or_default().as_str() {
+                        "Modifica Tel…" => {
+                            if let Some(u) = all.first() {
+                                let cur = config::tel_get(&u.book_key());
+                                if let Some(v) = dialog::input_default(&format!("Tel di {} (salvato solo su questo computer):", u.name()), &cur) {
+                                    config::tel_set(&u.book_key(), &v);
+                                    s.reload(&c);
                                 }
+                            } else {
+                                dialog::alert_default("Seleziona prima un utente.");
                             }
-                            "Aggiorna elenco" => c.engine.refresh(),
-                            "Impostazioni…" => c.tray_cmd(TrayCmd::Settings),
-                            "Registro messaggi" => c.tray_cmd(TrayCmd::Log),
-                            "Informazioni su POPMSG" => c.tray_cmd(TrayCmd::About),
-                            "Messaggio di assenza…" => sel.iter().for_each(|u| c.engine.request_absence(u)),
-                            "Togli dalla lista (se non in linea)" => {
-                                for t in targets.iter().filter(|t| !t.1) {
-                                    config::known_remove(&t.0.book_key());
-                                }
-                                s.reload(&c);
-                            }
-                            _ => sel.iter().for_each(|u| c.engine.request_version(u)),
                         }
+                        "Aggiorna elenco" => c.engine.refresh(),
+                        "Impostazioni…" => c.tray_cmd(TrayCmd::Settings),
+                        "Registro messaggi" => c.tray_cmd(TrayCmd::Log),
+                        "Informazioni su POPMSG" => c.tray_cmd(TrayCmd::About),
+                        "Messaggio di assenza…" => sel.iter().for_each(|u| c.engine.request_absence(u)),
+                        "Togli dalla lista (se non in linea)" => {
+                            for t in targets.iter().filter(|t| !t.1) {
+                                config::known_remove(&t.0.book_key());
+                            }
+                            s.reload(&c);
+                        }
+                        _ => sel.iter().for_each(|u| c.engine.request_version(u)),
                     }
-                    return true;
                 }
-                false
             });
         }
         sw.reload(ctl);
-        {
-            let mut l = sw.list.clone();
-            let rows = sw.rows.borrow();
-            for (i, a) in rows.iter().enumerate() {
-                if select.contains(a) {
-                    l.select(i as i32 + 1);
-                    l.middle_line(i as i32 + 1);
-                }
-            }
-        }
+        sw.list.select_keys(select);
         if !text.is_empty() {
             sw.buf.clone().set_text(text);
             ed.set_insert_position(text.len() as i32);
@@ -449,22 +522,10 @@ impl SendWin {
     /// Seleziona i membri di un gruppo (quelli non in linea solo se l'opzione è attiva).
     fn select_keys(&self, ctl: &Ctl, keys: &[String]) {
         self.reload(ctl);
-        let mut l = self.list.clone();
-        for i in 1..=l.size() {
-            l.deselect(i);
-        }
-        let rows = self.rows.borrow();
-        let mut found = 0;
-        for (i, k) in rows.iter().enumerate() {
-            if keys.contains(k) {
-                l.select(i as i32 + 1);
-                found += 1;
-            }
-        }
+        let found = self.list.select_keys(keys);
         if found < keys.len() {
             notice("POPMSG", &format!("{} membri del gruppo non sono raggiungibili ora e non sono stati selezionati.", keys.len() - found));
         }
-        l.redraw();
     }
 
     fn add_attachments(&self, col: &mut Flex, paths: Vec<PathBuf>) {
@@ -498,43 +559,30 @@ impl SendWin {
     }
 
     pub fn reload(&self, ctl: &Ctl) {
-        let mut list = self.list.clone();
-        let sel: Vec<String> = {
-            let rows = self.rows.borrow();
-            list.selected_items().iter().filter_map(|&i| rows.get(i as usize - 1).cloned()).collect()
-        };
-        let mut users = ctl.targets();
-        users.sort_by(|a, b| {
-            (!a.1, a.0.group.to_lowercase(), a.0.name().to_lowercase()).cmp(&(!b.1, b.0.group.to_lowercase(), b.0.name().to_lowercase()))
-        });
+        let users = ctl.targets();
         let port = ctl.engine.port();
-        list.clear();
-        let mut rows = self.rows.borrow_mut();
-        rows.clear();
-        for (u, online) in &users {
-            let ip = if !*online {
-                String::new()
-            } else if u.addr.port() == port {
-                u.addr.ip().to_string()
-            } else {
-                u.addr.to_string()
-            };
-            let name = if !*online {
-                format!("{} (non in linea)", u.name())
-            } else if u.absent() {
-                format!("{} (assente)", u.name())
-            } else {
-                u.name().to_string()
-            };
-            let tel = config::tel_get(&u.book_key());
-            // grigio per chi non è in linea (\u{1}C8 = colore "inattivo")
-            let g = if *online { "" } else { "\u{1}C8" };
-            list.add(&format!("{g}{name}\t{g}{}\t{g}{tel}\t{g}{}\t{g}{ip}", u.group, u.host));
-            rows.push(u.book_key());
-            if sel.contains(&u.book_key()) {
-                list.select(rows.len() as i32);
-            }
-        }
+        let rows: Vec<Row> = users
+            .iter()
+            .map(|(u, online)| {
+                let ip = if !*online {
+                    String::new()
+                } else if u.addr.port() == port {
+                    u.addr.ip().to_string()
+                } else {
+                    u.addr.to_string()
+                };
+                let name = if !*online {
+                    format!("{} (non in linea)", u.name())
+                } else if u.absent() {
+                    format!("{} (assente)", u.name())
+                } else {
+                    u.name().to_string()
+                };
+                let tel = config::tel_get(&u.book_key());
+                Row { key: u.book_key(), cells: [name, u.group.clone(), tel, u.host.clone(), ip], online: *online }
+            })
+            .collect();
+        self.list.set_rows(rows);
         let mut c = self.count.clone();
         c.set_label(&users.iter().filter(|u| u.1).count().to_string());
     }

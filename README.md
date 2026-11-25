@@ -14,7 +14,11 @@ librerie di sistema comprese). Funziona su **Windows**, **macOS** e **Linux**.
 
 ## Funzioni
 
-- Scoperta automatica degli utenti in rete (broadcast UDP), con nome, gruppo, host e IP
+- Scoperta automatica degli utenti in rete (broadcast UDP), mostrati in una **tabella a griglia**
+  con le colonne Utente, Gruppo, Tel, Host e Indirizzo IP: le colonne si allargano e restringono
+  trascinando il bordo dell'intestazione, si nascondono o mostrano col tasto destro
+  sull'intestazione, e un clic sull'intestazione ordina (un secondo clic inverte l'ordine).
+  La disposizione resta salvata
 - **Utenti non in linea** in grigio: si può scrivere anche a loro, il messaggio resta in attesa
   sul proprio computer e viene consegnato appena il destinatario apre POPMSG
   (opzione attivabile in *Impostazioni*, attiva di base)
@@ -23,7 +27,9 @@ librerie di sistema comprese). Funziona su **Windows**, **macOS** e **Linux**.
   (salvati solo sul proprio computer)
 - Colonna **Tel**: ognuno annota i numeri degli altri (tasto destro → *Modifica Tel…*),
   salvati solo sul proprio computer
-- **Emoticon** a colori (pulsante 😊), disegnate come immagini: uguali su tutti i sistemi
+- **Emoticon** a colori: tutto il set standard (circa 1900, divise in categorie come su
+  WhatsApp) dal pulsante 😊, più una **riga di preferite** sopra i pulsanti con quelle che usi
+  di più. Sono disegnate come immagini: uguali su tutti i sistemi
 - **Cifratura** RSA 2048 + AES 256 compatibile con IP Messenger, automatica quando anche
   l'altro la supporta; altrimenti il messaggio passa in chiaro
 - **Messaggi sigillati** con avviso di apertura al mittente

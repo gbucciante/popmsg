@@ -12,6 +12,7 @@ mod protocol;
 mod rich;
 mod tray;
 mod ui;
+mod usertable;
 
 use fltk::{app, dialog, enums::Font};
 

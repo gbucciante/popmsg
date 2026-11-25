@@ -450,3 +450,76 @@ pub fn group_delete(name: &str) {
     all.retain(|g| g.0 != name);
     write_rows("gruppi.txt", all.into_iter().map(|(n, k)| std::iter::once(n).chain(k).collect()));
 }
+
+// ---- aspetto della tabella utenti (larghezze, colonne nascoste, ordinamento) ----
+
+pub const COLS: [&str; 5] = ["Utente", "Gruppo", "Tel", "Host", "Indirizzo IP"];
+pub const COL_DEFAULT: [i32; 5] = [130, 110, 90, 80, 110];
+
+#[derive(Clone)]
+pub struct TableLayout {
+    /// larghezza delle colonne; negativa = nascosta (con la larghezza da ripristinare)
+    pub widths: [i32; 5],
+    pub sort_col: usize,
+    pub sort_asc: bool,
+}
+
+pub fn table_layout() -> TableLayout {
+    let mut t = TableLayout { widths: COL_DEFAULT, sort_col: 1, sort_asc: true };
+    if let Some(r) = read_rows("tabella.txt").into_iter().next() {
+        for (i, w) in r.iter().take(5).enumerate() {
+            if let Ok(v) = w.parse::<i32>() {
+                if v.abs() >= 20 {
+                    t.widths[i] = v;
+                }
+            }
+        }
+        t.sort_col = r.get(5).and_then(|v| v.parse().ok()).filter(|c: &usize| *c < 5).unwrap_or(1);
+        t.sort_asc = r.get(6).map(|v| v != "0").unwrap_or(true);
+    }
+    t.widths[0] = t.widths[0].abs(); // "Utente" è sempre visibile
+    t
+}
+
+pub fn save_table_layout(t: &TableLayout) {
+    let mut r: Vec<String> = t.widths.iter().map(|w| w.to_string()).collect();
+    r.push(t.sort_col.to_string());
+    r.push(if t.sort_asc { "1".into() } else { "0".into() });
+    write_rows("tabella.txt", std::iter::once(r));
+}
+
+// ---- emoticon preferite (le più usate) ----
+
+const DEFAULT_FAV: &[&str] = &["😊", "👍", "😂", "❤️", "🙏", "😉", "👋", "😍", "🎉", "✅", "😢", "🤔"];
+
+pub fn favorites(n: usize) -> Vec<String> {
+    let mut used: Vec<(String, u64)> = read_rows("emoticon.txt")
+        .into_iter()
+        .filter(|r| r.len() >= 2)
+        .map(|r| (r[0].clone(), r[1].parse().unwrap_or(0)))
+        .collect();
+    used.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out: Vec<String> = used.into_iter().map(|u| u.0).take(n).collect();
+    for d in DEFAULT_FAV {
+        if out.len() >= n {
+            break;
+        }
+        if !out.iter().any(|e| e == d) {
+            out.push(d.to_string());
+        }
+    }
+    out
+}
+
+pub fn emoji_used(e: &str) {
+    let mut rows = read_rows("emoticon.txt");
+    match rows.iter_mut().find(|r| r.first().map(|x| x == e).unwrap_or(false)) {
+        Some(r) => {
+            let n: u64 = r.get(1).and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
+            r.truncate(1);
+            r.push(n.to_string());
+        }
+        None => rows.push(vec![e.to_string(), "1".into()]),
+    }
+    write_rows("emoticon.txt", rows.into_iter());
+}
