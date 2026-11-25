@@ -424,3 +424,29 @@ pub fn outbox_remove(id: u64) {
         save_outbox(v);
     })
 }
+
+// ---- gruppi di invio personali (solo su questo computer) ----
+
+/// (nome del gruppo, chiavi degli utenti)
+pub fn groups_all() -> Vec<(String, Vec<String>)> {
+    let mut v: Vec<(String, Vec<String>)> = read_rows("gruppi.txt")
+        .into_iter()
+        .filter(|r| !r.is_empty() && !r[0].is_empty())
+        .map(|r| (r[0].clone(), r[1..].to_vec()))
+        .collect();
+    v.sort_by_key(|g| g.0.to_lowercase());
+    v
+}
+
+pub fn group_save(name: &str, keys: &[String]) {
+    let mut all = groups_all();
+    all.retain(|g| !g.0.eq_ignore_ascii_case(name));
+    all.push((name.to_string(), keys.to_vec()));
+    write_rows("gruppi.txt", all.into_iter().map(|(n, k)| std::iter::once(n).chain(k).collect()));
+}
+
+pub fn group_delete(name: &str) {
+    let mut all = groups_all();
+    all.retain(|g| g.0 != name);
+    write_rows("gruppi.txt", all.into_iter().map(|(n, k)| std::iter::once(n).chain(k).collect()));
+}

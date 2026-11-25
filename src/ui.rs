@@ -177,6 +177,8 @@ impl SendWin {
 
         let mut bottom = Flex::default().row();
         let mut attach = MenuButton::default().with_label("Allega");
+        let mut groups = MenuButton::default().with_label("Gruppi");
+        groups.set_tooltip("Seleziona, crea o elimina i tuoi gruppi di destinatari");
         let mut emo = Button::default();
         emo.set_image(crate::rich::emoji_image(0, 20));
         emo.set_tooltip("Emoticon");
@@ -186,6 +188,7 @@ impl SendWin {
         let mut send = ReturnButton::default().with_label("Invia");
         send.set_label_font(Font::HelveticaBold);
         bottom.fixed(&attach, 80);
+        bottom.fixed(&groups, 80);
         bottom.fixed(&emo, 40);
         bottom.fixed(&seal, 80);
         bottom.fixed(&send, 120);
@@ -217,6 +220,78 @@ impl SendWin {
             emo.set_callback(move |_| emoji_picker(ed2.clone()));
         }
         attach.add_choice("File…|Cartella…|Rimuovi allegati");
+        // gruppi: il menu viene ricostruito ogni volta che si apre
+        {
+            #[derive(Clone)]
+            enum GAct {
+                Select(Vec<String>),
+                Save,
+                Delete(String),
+            }
+            let acts: Rc<RefCell<Vec<(String, GAct)>>> = Rc::new(RefCell::new(Vec::new()));
+            {
+                let acts = acts.clone();
+                groups.handle(move |m, ev| {
+                    // il menu si ricostruisce quando il mouse entra nel pulsante (prima del clic)
+                    if ev == Event::Enter || ev == Event::Focus || (ev == Event::Push && m.size() == 0) {
+                        m.clear();
+                        let mut a = acts.borrow_mut();
+                        a.clear();
+                        let clean = |n: &str| lbl(n).replace(['/', '|', '\\', '_'], "-");
+                        let list = config::groups_all();
+                        let mut last = -1;
+                        for (name, keys) in &list {
+                            let path = format!("{}  ({})", clean(name), keys.len());
+                            last = m.add_choice(&path);
+                            a.push((path, GAct::Select(keys.clone())));
+                        }
+                        if last >= 0 {
+                            if let Some(mut it) = m.at(last) {
+                                it.set_flag(fltk::menu::MenuFlag::MenuDivider);
+                            }
+                        }
+                        m.add_choice("Salva selezione come gruppo…");
+                        a.push(("Salva selezione come gruppo…".into(), GAct::Save));
+                        for (name, _) in &list {
+                            let path = format!("Elimina gruppo/{}", clean(name));
+                            m.add_choice(&path);
+                            a.push((path, GAct::Delete(name.clone())));
+                        }
+                    }
+                    matches!(ev, Event::Enter)
+                });
+            }
+            let (s, c) = (sw.clone(), ctl.clone());
+            groups.set_callback(move |m| {
+                let Some(item) = m.value().ge(&0).then(|| m.at(m.value())).flatten() else { return };
+                let Ok(path) = m.item_pathname(Some(&item)) else { return };
+                let path = path.trim_start_matches('/').to_string();
+                let act = acts.borrow().iter().find(|(p, _)| *p == path).map(|x| x.1.clone());
+                match act {
+                    Some(GAct::Select(keys)) => s.select_keys(&c, &keys),
+                    Some(GAct::Save) => {
+                        let keys: Vec<String> = {
+                            let rows = s.rows.borrow();
+                            s.list.selected_items().iter().filter_map(|&i| rows.get(i as usize - 1).cloned()).collect()
+                        };
+                        if keys.is_empty() {
+                            dialog::alert_default("Seleziona prima gli utenti da mettere nel gruppo.");
+                        } else if let Some(name) = dialog::input_default(&format!("Nome del nuovo gruppo ({} utenti):", keys.len()), "") {
+                            let name = name.trim().replace('\t', " ");
+                            if !name.is_empty() {
+                                config::group_save(&name, &keys);
+                            }
+                        }
+                    }
+                    Some(GAct::Delete(n)) => {
+                        if dialog::choice2_default(&format!("Eliminare il gruppo «{n}»?"), "No", "Elimina", "") == Some(1) {
+                            config::group_delete(&n);
+                        }
+                    }
+                    None => {}
+                }
+            });
+        }
         {
             let s = sw.clone();
             let mut col = col.clone();
@@ -369,6 +444,27 @@ impl SendWin {
         win.show();
         let _ = ed.take_focus();
         sw
+    }
+
+    /// Seleziona i membri di un gruppo (quelli non in linea solo se l'opzione è attiva).
+    fn select_keys(&self, ctl: &Ctl, keys: &[String]) {
+        self.reload(ctl);
+        let mut l = self.list.clone();
+        for i in 1..=l.size() {
+            l.deselect(i);
+        }
+        let rows = self.rows.borrow();
+        let mut found = 0;
+        for (i, k) in rows.iter().enumerate() {
+            if keys.contains(k) {
+                l.select(i as i32 + 1);
+                found += 1;
+            }
+        }
+        if found < keys.len() {
+            notice("POPMSG", &format!("{} membri del gruppo non sono raggiungibili ora e non sono stati selezionati.", keys.len() - found));
+        }
+        l.redraw();
     }
 
     fn add_attachments(&self, col: &mut Flex, paths: Vec<PathBuf>) {

@@ -8,9 +8,9 @@ Scritto in **Rust** con la libreria grafica **FLTK**: un solo eseguibile di circ
 nessuna installazione, circa **3 MB di memoria privata** (11-12 MB di RSS su Linux,
 librerie di sistema comprese). Funziona su **Windows**, **macOS** e **Linux**.
 
-| Messaggi ricevuti | Emoticon | Utenti non in linea |
-|---|---|---|
-| ![](docs/ricezione.png) | ![](docs/emoticon.png) | ![](docs/in-attesa.png) |
+| Messaggi ricevuti | Emoticon | Utenti non in linea | Gruppi |
+|---|---|---|---|
+| ![](docs/ricezione.png) | ![](docs/emoticon.png) | ![](docs/in-attesa.png) | ![](docs/gruppi.png) |
 
 ## Funzioni
 
@@ -18,6 +18,9 @@ librerie di sistema comprese). Funziona su **Windows**, **macOS** e **Linux**.
 - **Utenti non in linea** in grigio: si può scrivere anche a loro, il messaggio resta in attesa
   sul proprio computer e viene consegnato appena il destinatario apre POPMSG
   (opzione attivabile in *Impostazioni*, attiva di base)
+- **Gruppi di destinatari** personali: seleziona gli utenti, *Gruppi → Salva selezione come gruppo…*,
+  poi con un clic sul nome del gruppo li selezioni tutti e invii lo stesso messaggio a ciascuno
+  (salvati solo sul proprio computer)
 - Colonna **Tel**: ognuno annota i numeri degli altri (tasto destro → *Modifica Tel…*),
   salvati solo sul proprio computer
 - **Emoticon** a colori (pulsante 😊), disegnate come immagini: uguali su tutti i sistemi
@@ -45,7 +48,7 @@ Al primo avvio Windows può chiedere di consentire l'accesso alla rete: consenti
 
 Nella cartella `%APPDATA%\POPMSG` (Windows), `~/Library/Application Support/POPMSG` (macOS)
 o `~/.config/popmsg` (Linux): impostazioni (`popmsg.ini`), chiave RSA personale (`key.pem`),
-rubrica dei numeri (`rubrica.ini`), utenti conosciuti (`utenti.txt`), messaggi in attesa
+rubrica dei numeri (`rubrica.ini`), gruppi (`gruppi.txt`), utenti conosciuti (`utenti.txt`), messaggi in attesa
 (`in_attesa.txt`) e registro (`popmsg.log`).
 
 ## Compilare
