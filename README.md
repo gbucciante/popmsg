@@ -26,7 +26,8 @@ librerie di sistema comprese). Funziona su **Windows**, **macOS** e **Linux**.
   - *Aggiungi utente…*: nome, gruppo e nome del computer o indirizzo IP; quando quella persona
     aprirà POPMSG verrà riconosciuta e riceverà i messaggi in attesa
   - *Esporta elenco utenti…* / *Importa elenco utenti…*: chi ha già l'elenco completo lo salva
-    in un file e gli altri lo importano (i numeri di Tel non vengono esportati)
+    in un file, con o senza i numeri di Tel, e gli altri lo importano (i numeri di Tel già
+    scritti su quel computer non vengono cambiati)
 - **Gruppi di destinatari** personali: seleziona gli utenti, *Gruppi → Salva selezione come gruppo…*,
   poi con un clic sul nome del gruppo li selezioni tutti e invii lo stesso messaggio a ciascuno
   (salvati solo sul proprio computer)

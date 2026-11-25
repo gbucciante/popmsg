@@ -601,13 +601,14 @@ pub fn known_rekey(old: &str, new: &str) {
 
 const EXPORT_HEADER: &str = "# POPMSG elenco utenti";
 
-/// Scrive l'elenco degli utenti conosciuti in un file da passare agli altri PC
-/// (senza i numeri di Tel, che restano privati).
-pub fn known_export(path: &std::path::Path) -> std::io::Result<usize> {
+/// Scrive l'elenco degli utenti conosciuti in un file da passare agli altri PC,
+/// con i numeri di Tel se richiesto.
+pub fn known_export(path: &std::path::Path, with_tel: bool) -> std::io::Result<usize> {
     let all = known_all();
     let mut text = format!("{EXPORT_HEADER}\n");
     for k in &all {
-        let r = [&k.key, &k.login, &k.host, &k.nick, &k.group, &k.addr];
+        let tel = if with_tel { tel_get(&k.key) } else { String::new() };
+        let r = [&k.key, &k.login, &k.host, &k.nick, &k.group, &k.addr, &tel];
         text.push_str(&r.iter().map(|f| esc_field(f)).collect::<Vec<_>>().join("\t"));
         text.push('\n');
     }
@@ -615,18 +616,33 @@ pub fn known_export(path: &std::path::Path) -> std::io::Result<usize> {
     Ok(all.len())
 }
 
-/// Aggiunge gli utenti di un file esportato; restituisce quanti erano nuovi.
-pub fn known_import(path: &std::path::Path) -> Result<usize, String> {
+/// Aggiunge gli utenti di un file esportato e i numeri di Tel che qui mancano;
+/// restituisce (utenti nuovi, numeri di Tel aggiunti).
+pub fn known_import(path: &std::path::Path) -> Result<(usize, usize), String> {
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
     if !text.starts_with(EXPORT_HEADER) {
         return Err("il file non è un elenco utenti di POPMSG".into());
     }
     let have: std::collections::HashSet<String> = known_all().into_iter().map(|k| k.key).collect();
-    let new: Vec<Known> = text
+    let rows: Vec<Vec<String>> = text
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(|l| l.split('\t').map(unesc_field).collect::<Vec<_>>())
-        .filter(|r| r.len() >= 6 && !r[0].is_empty() && !have.contains(&r[0]))
+        .filter(|r| r.len() >= 6 && !r[0].is_empty())
+        .collect();
+    // i numeri già scritti su questo computer non vengono sovrascritti
+    let mut tels = 0;
+    for r in &rows {
+        if let Some(t) = r.get(6).filter(|t| !t.trim().is_empty()) {
+            if tel_get(&r[0]).is_empty() {
+                tel_set(&r[0], t);
+                tels += 1;
+            }
+        }
+    }
+    let new: Vec<Known> = rows
+        .iter()
+        .filter(|r| !have.contains(&r[0]))
         .map(|r| Known {
             key: r[0].clone(),
             login: r[1].clone(),
@@ -637,7 +653,7 @@ pub fn known_import(path: &std::path::Path) -> Result<usize, String> {
         })
         .collect();
     known_update(&new);
-    Ok(new.len())
+    Ok((new.len(), tels))
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -664,10 +680,16 @@ mod tests {
         known_add_manual("Luca", "", "PC-LUCA", "");
         assert!(manual_match("pc-luca", "10.0.0.9".parse().unwrap()).is_some());
         let f = dir.join("export.txt");
-        assert_eq!(known_export(&f).unwrap(), 1);
+        tel_set("@PC-LUCA", "333 1234567");
+        assert_eq!(known_export(&f, true).unwrap(), 1);
         known_remove("@PC-LUCA");
-        assert_eq!(known_import(&f).unwrap(), 1);
-        assert_eq!(known_import(&f).unwrap(), 0);
+        tel_set("@PC-LUCA", "");
+        assert_eq!(known_import(&f).unwrap(), (1, 1));
+        assert_eq!(tel_get("@PC-LUCA"), "333 1234567");
+        assert_eq!(known_import(&f).unwrap(), (0, 0));
+        known_export(&f, false).unwrap();
+        tel_set("@PC-LUCA", "");
+        assert_eq!(known_import(&f).unwrap(), (0, 0));
         let _ = fs::remove_dir_all(&dir);
     }
 }

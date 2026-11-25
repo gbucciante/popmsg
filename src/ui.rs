@@ -497,6 +497,11 @@ impl SendWin {
                         "Aggiorna elenco" => c.refresh_all(),
                         "Aggiungi utente…" => add_user_dialog(&c),
                         "Esporta elenco utenti…" => {
+                            let Some(choice) = dialog::choice2_default("Esportare anche i numeri di Tel?", "Annulla", "Senza Tel", "Con i numeri di Tel") else { return };
+                            if choice == 0 {
+                                return;
+                            }
+                            let with_tel = choice == 2;
                             let mut d = dialog::NativeFileChooser::new(dialog::NativeFileChooserType::BrowseSaveFile);
                             d.set_title("Esporta elenco utenti");
                             d.set_preset_file("utenti-popmsg.txt");
@@ -504,7 +509,7 @@ impl SendWin {
                             d.show();
                             let f = d.filename();
                             if !f.as_os_str().is_empty() {
-                                match config::known_export(&f) {
+                                match config::known_export(&f, with_tel) {
                                     Ok(n) => notice("POPMSG", &format!("Elenco di {n} utenti salvato in\n{}\n\nSugli altri PC: tasto destro sulla lista → Importa elenco utenti…", f.display())),
                                     Err(e) => dialog::alert_default(&format!("Impossibile salvare il file: {e}")),
                                 }
@@ -517,12 +522,15 @@ impl SendWin {
                             let f = d.filename();
                             if !f.as_os_str().is_empty() {
                                 match config::known_import(&f) {
-                                    Ok(n) => {
-                                        if !c.cfg.borrow().offline {
-                                            notice("POPMSG", &format!("{n} utenti aggiunti. Per vederli quando non sono in linea attiva l'opzione in Impostazioni."));
-                                        } else {
-                                            notice("POPMSG", &format!("{n} nuovi utenti aggiunti all'elenco."));
+                                    Ok((n, t)) => {
+                                        let mut msg = format!("{n} nuovi utenti aggiunti all'elenco, {t} numeri di Tel aggiunti.");
+                                        if t > 0 {
+                                            msg.push_str("\n(I numeri già presenti su questo computer non sono stati cambiati.)");
                                         }
+                                        if !c.cfg.borrow().offline {
+                                            msg.push_str("\nPer vedere gli utenti quando non sono in linea attiva l'opzione in Impostazioni.");
+                                        }
+                                        notice("POPMSG", &msg);
                                         c.probe_known();
                                         s.reload(&c);
                                     }
