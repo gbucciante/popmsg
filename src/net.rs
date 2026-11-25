@@ -312,6 +312,18 @@ impl Engine {
         self.broadcast(p::BR_ABSENCE | cmd, &nick, &tail);
     }
 
+    /// Annuncio diretto a indirizzi precisi (utenti noti fuori dal broadcast):
+    /// chi è in linea risponde e compare nell'elenco.
+    pub fn probe(&self, addrs: &[Addr]) {
+        let (cmd, nick, tail) = self.entry();
+        let data = self.packet(p::next_packet_no(), p::BR_ENTRY | cmd, &nick, &tail);
+        for a in addrs {
+            if !a.ip().is_unspecified() && a.port() != 0 {
+                self.send_to(*a, &data);
+            }
+        }
+    }
+
     pub fn refresh(&self) {
         self.lock().users.clear();
         self.emit(Event::UsersChanged);

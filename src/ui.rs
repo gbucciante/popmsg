@@ -309,8 +309,10 @@ impl SendWin {
         });
 
         // azioni
-        let eng = ctl.engine.clone();
-        refresh.set_callback(move |_| eng.refresh());
+        {
+            let c = ctl.clone();
+            refresh.set_callback(move |_| c.refresh_all());
+        }
         {
             let ed2 = ed.clone();
             emo.set_callback(move |_| emoji_picker(ed2.clone()));
@@ -475,7 +477,7 @@ impl SendWin {
             let (s, c) = (Rc::downgrade(&sw), ctl.clone());
             sw.list.set_menu(move || {
                 let Some(s) = s.upgrade() else { return };
-                let menu = fltk::menu::MenuItem::new(&["Modifica Tel…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Informazioni su POPMSG"]);
+                let menu = fltk::menu::MenuItem::new(&["Modifica Tel…", "Aggiungi utente…", "Importa elenco utenti…", "Esporta elenco utenti…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Informazioni su POPMSG"]);
                 if let Some(item) = menu.popup(app::event_x(), app::event_y()) {
                     let targets: Vec<(User, bool)> = s.list.selected_keys().iter().filter_map(|k| c.target(k)).collect();
                     let sel: Vec<User> = targets.iter().filter(|t| t.1).map(|t| t.0.clone()).collect();
@@ -492,7 +494,42 @@ impl SendWin {
                                 dialog::alert_default("Seleziona prima un utente.");
                             }
                         }
-                        "Aggiorna elenco" => c.engine.refresh(),
+                        "Aggiorna elenco" => c.refresh_all(),
+                        "Aggiungi utente…" => add_user_dialog(&c),
+                        "Esporta elenco utenti…" => {
+                            let mut d = dialog::NativeFileChooser::new(dialog::NativeFileChooserType::BrowseSaveFile);
+                            d.set_title("Esporta elenco utenti");
+                            d.set_preset_file("utenti-popmsg.txt");
+                            d.set_option(dialog::NativeFileChooserOptions::SaveAsConfirm);
+                            d.show();
+                            let f = d.filename();
+                            if !f.as_os_str().is_empty() {
+                                match config::known_export(&f) {
+                                    Ok(n) => notice("POPMSG", &format!("Elenco di {n} utenti salvato in\n{}\n\nSugli altri PC: tasto destro sulla lista → Importa elenco utenti…", f.display())),
+                                    Err(e) => dialog::alert_default(&format!("Impossibile salvare il file: {e}")),
+                                }
+                            }
+                        }
+                        "Importa elenco utenti…" => {
+                            let mut d = dialog::NativeFileChooser::new(dialog::NativeFileChooserType::BrowseFile);
+                            d.set_title("Importa elenco utenti");
+                            d.show();
+                            let f = d.filename();
+                            if !f.as_os_str().is_empty() {
+                                match config::known_import(&f) {
+                                    Ok(n) => {
+                                        if !c.cfg.borrow().offline {
+                                            notice("POPMSG", &format!("{n} utenti aggiunti. Per vederli quando non sono in linea attiva l'opzione in Impostazioni."));
+                                        } else {
+                                            notice("POPMSG", &format!("{n} nuovi utenti aggiunti all'elenco."));
+                                        }
+                                        c.probe_known();
+                                        s.reload(&c);
+                                    }
+                                    Err(e) => dialog::alert_default(&format!("Impossibile importare: {e}")),
+                                }
+                            }
+                        }
                         "Impostazioni…" => c.tray_cmd(TrayCmd::Settings),
                         "Registro messaggi" => c.tray_cmd(TrayCmd::Log),
                         "Informazioni su POPMSG" => c.tray_cmd(TrayCmd::About),
@@ -586,6 +623,74 @@ impl SendWin {
         let mut c = self.count.clone();
         c.set_label(&users.iter().filter(|u| u.1).count().to_string());
     }
+}
+
+/// Aggiunge a mano un utente che non ha ancora aperto POPMSG.
+fn add_user_dialog(ctl: &Rc<Ctl>) {
+    let mut w = Window::default().with_size(400, 250).with_label("Aggiungi utente").center_screen();
+    let mut col = Flex::default_fill().column();
+    col.set_margin(10);
+    col.set_pad(6);
+    let mut info = Frame::default().with_label(
+        "Per chi non ha ancora aperto POPMSG. Quando lo aprirà verrà riconosciuto dal nome del computer (o dall'indirizzo IP) e riceverà i messaggi in attesa.",
+    );
+    info.set_align(Align::Wrap | Align::Inside | Align::Left);
+    info.set_label_size(12);
+    col.fixed(&info, 48);
+    let field = |label: &str, col: &mut Flex| {
+        let mut row = Flex::default().row();
+        let l = Frame::default().with_label(label).with_align(Align::Inside | Align::Right);
+        let inp = Input::default();
+        row.fixed(&l, 130);
+        row.end();
+        col.fixed(&row, 26);
+        inp
+    };
+    let mut name = field("Nome:", &mut col);
+    let group = field("Gruppo:", &mut col);
+    let host = field("Nome del computer:", &mut col);
+    let ip = field("Indirizzo IP:", &mut col);
+    Frame::default();
+    let mut row = Flex::default().row();
+    Frame::default();
+    let mut cancel = Button::default().with_label("Annulla");
+    let mut ok = ReturnButton::default().with_label("Aggiungi");
+    row.fixed(&cancel, 90);
+    row.fixed(&ok, 100);
+    row.end();
+    col.fixed(&row, 28);
+    col.end();
+    w.end();
+    w.make_modal(true);
+    setup_window(&mut w);
+    {
+        let w = w.clone();
+        cancel.set_callback(move |_| w.clone().do_callback());
+    }
+    {
+        let (w, c) = (w.clone(), ctl.clone());
+        let (name, group, host, ip) = (name.clone(), group.clone(), host.clone(), ip.clone());
+        ok.set_callback(move |_| {
+            let (n, h, i) = (name.value(), host.value(), ip.value());
+            if n.trim().is_empty() || (h.trim().is_empty() && i.trim().is_empty()) {
+                dialog::alert_default("Scrivi il nome e almeno il nome del computer o l'indirizzo IP.");
+                return;
+            }
+            if !i.trim().is_empty() && i.trim().parse::<std::net::IpAddr>().is_err() {
+                dialog::alert_default("L'indirizzo IP non è valido (esempio: 192.168.1.20).");
+                return;
+            }
+            config::known_add_manual(&n, &group.value(), &h, &i);
+            if !c.cfg.borrow().offline {
+                notice("POPMSG", "Utente aggiunto. Per vederlo quando non è in linea attiva l'opzione in Impostazioni.");
+            }
+            c.probe_known();
+            c.users_changed();
+            w.clone().do_callback();
+        });
+    }
+    w.show();
+    let _ = name.take_focus();
 }
 
 fn percent_decode(s: &str) -> String {
@@ -981,8 +1086,25 @@ impl Ctl {
         self.send_wins.borrow_mut().push(w);
     }
 
+    /// Annuncia la presenza in broadcast e direttamente agli utenti noti non in linea.
+    pub fn refresh_all(&self) {
+        self.engine.refresh();
+        self.probe_known();
+    }
+
+    pub fn probe_known(&self) {
+        let addrs: Vec<Addr> = config::known_all().iter().filter_map(|k| k.addr.parse().ok()).collect();
+        self.engine.probe(&addrs);
+    }
+
     pub fn users_changed(&self) {
         let online = self.engine.users();
+        // utenti aggiunti a mano: quando compaiono, prendono la loro chiave vera
+        for u in &online {
+            if let Some(old) = config::manual_match(&u.host, std::net::IpAddr::V4(*u.addr.ip())) {
+                config::known_rekey(&old, &u.book_key());
+            }
+        }
         config::known_update(
             &online
                 .iter()

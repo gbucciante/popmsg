@@ -523,3 +523,151 @@ pub fn emoji_used(e: &str) {
     }
     write_rows("emoticon.txt", rows.into_iter());
 }
+
+// ---- utenti aggiunti a mano, importazione ed esportazione dell'elenco ----
+
+/// le voci aggiunte a mano non hanno il nome di login: chiave "@computer" o "@IP"
+pub const MANUAL_PREFIX: &str = "@";
+
+/// Aggiunge un utente che non ha ancora mai aperto POPMSG; restituisce la chiave.
+/// Quando comparirà in rete verrà riconosciuto dal nome del computer o dall'IP.
+pub fn known_add_manual(nick: &str, group: &str, host: &str, ip: &str) -> String {
+    let id = if host.trim().is_empty() { ip.trim().to_string() } else { host.trim().to_string() };
+    let key = format!("{MANUAL_PREFIX}{id}");
+    let addr = ip
+        .trim()
+        .parse::<std::net::IpAddr>()
+        .map(|i| std::net::SocketAddr::new(i, DEFAULT_PORT).to_string())
+        .unwrap_or_default();
+    known_update(&[Known {
+        key: key.clone(),
+        login: String::new(),
+        host: id,
+        nick: nick.trim().to_string(),
+        group: group.trim().to_string(),
+        addr,
+    }]);
+    key
+}
+
+/// Utente aggiunto a mano che corrisponde a chi è appena comparso in rete.
+pub fn manual_match(host: &str, ip: std::net::IpAddr) -> Option<String> {
+    with_known(|m| {
+        m.values()
+            .filter(|k| k.key.starts_with(MANUAL_PREFIX))
+            .find(|k| k.host.eq_ignore_ascii_case(host) || k.host.parse::<std::net::IpAddr>().map(|a| a == ip).unwrap_or(false))
+            .map(|k| k.key.clone())
+    })
+}
+
+/// Sposta su una nuova chiave tutto ciò che riguarda un utente:
+/// voce dell'elenco, Tel, messaggi in attesa, gruppi.
+pub fn known_rekey(old: &str, new: &str) {
+    if old == new {
+        return;
+    }
+    with_known(|m| {
+        if m.remove(old).is_some() {
+            save_known(m);
+        }
+    });
+    let tel = tel_get(old);
+    if !tel.is_empty() {
+        if tel_get(new).is_empty() {
+            tel_set(new, &tel);
+        }
+        tel_set(old, "");
+    }
+    with_outbox(|v| {
+        let mut changed = false;
+        for q in v.iter_mut().filter(|q| q.key == old) {
+            q.key = new.to_string();
+            changed = true;
+        }
+        if changed {
+            save_outbox(v);
+        }
+    });
+    let groups = groups_all();
+    if groups.iter().any(|g| g.1.iter().any(|k| k == old)) {
+        let rows = groups.into_iter().map(|(n, ks)| {
+            let mut ks: Vec<String> = ks.into_iter().map(|k| if k == old { new.to_string() } else { k }).collect();
+            ks.dedup();
+            std::iter::once(n).chain(ks).collect()
+        });
+        write_rows("gruppi.txt", rows);
+    }
+}
+
+const EXPORT_HEADER: &str = "# POPMSG elenco utenti";
+
+/// Scrive l'elenco degli utenti conosciuti in un file da passare agli altri PC
+/// (senza i numeri di Tel, che restano privati).
+pub fn known_export(path: &std::path::Path) -> std::io::Result<usize> {
+    let all = known_all();
+    let mut text = format!("{EXPORT_HEADER}\n");
+    for k in &all {
+        let r = [&k.key, &k.login, &k.host, &k.nick, &k.group, &k.addr];
+        text.push_str(&r.iter().map(|f| esc_field(f)).collect::<Vec<_>>().join("\t"));
+        text.push('\n');
+    }
+    fs::write(path, text)?;
+    Ok(all.len())
+}
+
+/// Aggiunge gli utenti di un file esportato; restituisce quanti erano nuovi.
+pub fn known_import(path: &std::path::Path) -> Result<usize, String> {
+    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    if !text.starts_with(EXPORT_HEADER) {
+        return Err("il file non è un elenco utenti di POPMSG".into());
+    }
+    let have: std::collections::HashSet<String> = known_all().into_iter().map(|k| k.key).collect();
+    let new: Vec<Known> = text
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.split('\t').map(unesc_field).collect::<Vec<_>>())
+        .filter(|r| r.len() >= 6 && !r[0].is_empty() && !have.contains(&r[0]))
+        .map(|r| Known {
+            key: r[0].clone(),
+            login: r[1].clone(),
+            host: r[2].clone(),
+            nick: r[3].clone(),
+            group: r[4].clone(),
+            addr: r[5].clone(),
+        })
+        .collect();
+    known_update(&new);
+    Ok(new.len())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_users_export_import() {
+        let dir = std::env::temp_dir().join(format!("popmsg-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+        let k = known_add_manual("Marta", "Commerciale", "", "10.0.0.7");
+        assert_eq!(k, "@10.0.0.7");
+        tel_set(&k, "123");
+        outbox_add(&k, "Marta", "ciao", false, &[]);
+        group_save("G", &[k.clone()]);
+        let ip: std::net::IpAddr = "10.0.0.7".parse().unwrap();
+        assert_eq!(manual_match("pc-marta", ip).as_deref(), Some(k.as_str()));
+        known_rekey(&k, "marta@pc-marta");
+        assert!(manual_match("pc-marta", ip).is_none());
+        assert_eq!(tel_get("marta@pc-marta"), "123");
+        assert_eq!(outbox_all()[0].key, "marta@pc-marta");
+        assert_eq!(groups_all()[0].1, vec!["marta@pc-marta".to_string()]);
+        known_add_manual("Luca", "", "PC-LUCA", "");
+        assert!(manual_match("pc-luca", "10.0.0.9".parse().unwrap()).is_some());
+        let f = dir.join("export.txt");
+        assert_eq!(known_export(&f).unwrap(), 1);
+        known_remove("@PC-LUCA");
+        assert_eq!(known_import(&f).unwrap(), 1);
+        assert_eq!(known_import(&f).unwrap(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

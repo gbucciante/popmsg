@@ -207,11 +207,9 @@ impl UserTable {
             }
             Event::Push => {
                 swallow = true;
-                let Some((ctx, row, col, flag)) = t.cursor2rowcol() else {
-                    swallow = false;
-                    return false;
-                };
                 let right = app::event_mouse_button() == app::MouseButton::Right;
+                // tasto destro nella zona vuota: menu anche con l'elenco vuoto
+                let (ctx, row, col, flag) = t.cursor2rowcol().unwrap_or((TableContext::Cell, -1, -1, TableResizeFlag::None));
                 match ctx {
                     TableContext::ColHeader if right => {
                         me.column_menu();
@@ -224,8 +222,8 @@ impl UserTable {
                         }
                         true
                     }
-                    TableContext::Cell if right => {
-                        if !t.row_selected(row) {
+                    TableContext::Cell | TableContext::Table | TableContext::None if right => {
+                        if row >= 0 && ctx == TableContext::Cell && !t.row_selected(row) {
                             t.select_all_rows(TableRowSelectFlag::Deselect);
                             let _ = t.select_row(row, TableRowSelectFlag::Select);
                             t.redraw();
@@ -242,6 +240,7 @@ impl UserTable {
                         swallow = false;
                         false
                     }
+                    // (clic sinistro fuori dalle celle: lo gestisce la tabella)
                 }
             }
             Event::Released => {

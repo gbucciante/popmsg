@@ -57,6 +57,7 @@ fn main() {
     };
     engine.set_absence(false, Some(&cfg.absence_text));
     let ctl = ui::Ctl::new(engine, cfg);
+    ctl.probe_known();
 
     let show = std::env::args().any(|a| a == "--show");
     // l'icona di sistema va creata a ciclo eventi avviato (necessario su macOS)
