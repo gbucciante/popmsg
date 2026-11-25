@@ -441,13 +441,14 @@ impl Engine {
         let mut extra = text.to_string();
         let mut tail: Vec<String> = if file_list.is_empty() { vec![] } else { vec![file_list.to_string()] };
         if let Some(peer) = peer.filter(|pk| crypto::choose_caps(pk) != 0) {
-            let mut plain = text.to_string();
+            // IP Messenger tratta il testo decifrato come stringa C: serve il '\0'
+            // finale, altrimenti mostra il padding e i byte che seguono in memoria.
             let mut c2 = cmd;
-            if !file_list.is_empty() && ext {
+            let with_files = !file_list.is_empty() && ext;
+            if with_files {
                 c2 |= p::ENCEXTMSGOPT;
-                plain.push('\0');
-                plain.push_str(file_list);
             }
+            let plain = p::encrypted_body(text, if with_files { file_list } else { "" });
             match crypto::encrypt(&peer, plain.as_bytes(), no) {
                 Ok(enc) => {
                     extra = enc;
@@ -688,6 +689,8 @@ impl Engine {
                 text = format!("[Messaggio cifrato che non è stato possibile decifrare: {err}]");
             }
         }
+        // caratteri di controllo (tranne a capo e tabulazione) non sono testo
+        text.retain(|c| c == '\n' || c == '\t' || !c.is_control());
         let files = if pk.has(p::FILEATTACHOPT) { p::parse_file_list(&file_text) } else { vec![] };
         if absent && !pk.has(p::AUTORETOPT | p::BROADCASTOPT) {
             self.reply(a, p::SENDMSG | p::AUTORETOPT, &absence_text);

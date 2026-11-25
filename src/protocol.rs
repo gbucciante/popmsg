@@ -119,7 +119,22 @@ pub fn build(packet_no: u64, user: &str, host: &str, command: u32, extra: &str, 
         out.push(0);
         out.extend_from_slice(t.as_bytes());
     }
+    // come IP Messenger: il pacchetto termina con '\0'
+    out.push(0);
     out
+}
+
+/// Testo in chiaro da cifrare: messaggio e (con ENCEXTMSGOPT) elenco dei file,
+/// ciascuno terminato da '\0' come fa IP Messenger.
+pub fn encrypted_body(text: &str, file_list: &str) -> String {
+    let mut s = String::with_capacity(text.len() + file_list.len() + 2);
+    s.push_str(text);
+    s.push('\0');
+    if !file_list.is_empty() {
+        s.push_str(file_list);
+        s.push('\0');
+    }
+    s
 }
 
 pub fn parse(data: &[u8]) -> Option<Packet> {
@@ -129,7 +144,10 @@ pub fn parse(data: &[u8]) -> Option<Packet> {
     let user = parts.next()?;
     let host = parts.next()?;
     let command = std::str::from_utf8(parts.next()?).ok()?.trim().parse::<u32>().ok()?;
-    let extra = parts.next().unwrap_or(&[]).to_vec();
+    let mut extra = parts.next().unwrap_or(&[]).to_vec();
+    if extra.last() == Some(&0) {
+        extra.pop(); // terminatore finale
+    }
     let utf8 = command & UTF8OPT != 0;
     let mut sections = extra.split(|&b| b == 0);
     let message = decode(sections.next().unwrap_or(&[]), utf8);
@@ -290,6 +308,11 @@ mod tests {
         assert_eq!(parse_dir_header(&h).unwrap(), ("x:y".into(), 255, 1, 99));
         let p = parse(&build(7, "u", "h", SENDMSG, "ciao è", &["x".into()])).unwrap();
         assert_eq!(p.message, "ciao è");
+        let raw = build(7, "u", "h", SENDMSG, "ciao", &[]);
+        assert_eq!(raw.last(), Some(&0));
+        assert!(parse(&raw).unwrap().tail.is_empty());
+        assert_eq!(encrypted_body("ciao", ""), "ciao\0");
+        assert_eq!(encrypted_body("ciao", "f"), "ciao\0f\0");
         assert_eq!(p.tail, vec!["x".to_string()]);
         let (legacy, _, _) = encoding_rs::SHIFT_JIS.encode("1:5:taro:pc:32:こんにちは");
         assert_eq!(parse(&legacy).unwrap().message, "こんにちは");
