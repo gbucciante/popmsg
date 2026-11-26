@@ -63,6 +63,8 @@ pub struct Config {
     pub password_all: bool,
     /// scambia automaticamente l'elenco utenti con gli altri POPMSG
     pub share_list: bool,
+    /// usa il formato v5 di IP Messenger (IPDict) con chi lo supporta
+    pub ipdict: bool,
 }
 
 impl Config {
@@ -100,6 +102,7 @@ impl Config {
             password: s("password", ""),
             password_all: b("password_all", false),
             share_list: b("share_list", true),
+            ipdict: b("ipdict", false),
         }
     }
 
@@ -123,6 +126,7 @@ impl Config {
             ("password", self.password.clone()),
             ("password_all", bl(self.password_all).into()),
             ("share_list", bl(self.share_list).into()),
+            ("ipdict", bl(self.ipdict).into()),
         ];
         let text: String = lines.iter().map(|(k, v)| format!("{k}={}\n", escape(v))).collect();
         let _ = fs::write(Self::path(), text);

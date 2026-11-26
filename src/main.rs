@@ -5,6 +5,7 @@
 mod config;
 mod crypto;
 mod emoji;
+mod ipdict;
 mod net;
 #[cfg(test)]
 mod net_tests;
@@ -57,6 +58,7 @@ fn main() {
     };
     engine.set_absence(false, Some(&cfg.absence_text));
     engine.set_share_list(cfg.share_list);
+    engine.set_ipdict(cfg.ipdict);
     let ctl = ui::Ctl::new(engine, cfg);
     ctl.probe_known();
 

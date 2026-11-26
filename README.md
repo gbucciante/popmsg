@@ -22,6 +22,9 @@ librerie di sistema comprese). Funziona su **Windows**, **macOS** e **Linux**.
 - **Utenti non in linea** in grigio: si può scrivere anche a loro, il messaggio resta in attesa
   sul proprio computer e viene consegnato appena il destinatario apre POPMSG
   (opzione attivabile in *Impostazioni*, attiva di base)
+- **Elenco utenti condiviso**: quando due POPMSG si incontrano si scambiano da soli l'elenco
+  degli utenti conosciuti (senza i numeri di Tel), così ognuno vede in grigio anche chi non ha
+  mai incontrato direttamente (opzione in *Impostazioni*, attiva di base)
 - Non serve aspettare che tutti aprano POPMSG almeno una volta: col tasto destro sulla lista
   - *Aggiungi utente…*: nome, gruppo e nome del computer o indirizzo IP; quando quella persona
     aprirà POPMSG verrà riconosciuta e riceverà i messaggi in attesa
@@ -38,11 +41,20 @@ librerie di sistema comprese). Funziona su **Windows**, **macOS** e **Linux**.
   di più. Sono disegnate come immagini: uguali su tutti i sistemi
 - **Cifratura** RSA 2048 + AES 256 compatibile con IP Messenger, automatica quando anche
   l'altro la supporta; altrimenti il messaggio passa in chiaro
-- **Messaggi sigillati** con avviso di apertura al mittente
+- **Firma digitale** (RSA + SHA-256) su ogni messaggio cifrato: chi riceve vede
+  *firma verificata* oppure *FIRMA NON VALIDA*
+- **Formato v5** di IP Messenger (pacchetti IPDict cifrati con AES-256-CTR e firmati), usato con
+  chi lo supporta; opzione *sperimentale* in *Impostazioni*, spenta di base
+- **Messaggi sigillati** di base, con avviso di apertura al mittente. Con il **lucchetto** il
+  destinatario deve inserire la propria password per aprirli (la password si imposta in
+  *Impostazioni*; c'è anche l'opzione per chiederla per tutti i sigillati)
+- **Immagini incollate** dagli appunti con Ctrl+V nel testo: partono come immagini di
+  IP Messenger e chi riceve le vede come miniature dentro il messaggio (clic per aprirle)
 - **Rispondi** con citazione, invio con **Ctrl+Invio**, conferma di consegna e nuovi tentativi
 - **Modalità assenza** con risposta automatica (preimpostate o personalizzata)
 - **Invio di file e cartelle** via TCP (trascinandoli nella finestra o con *Allega*)
-- Icona nella barra di sistema, registro dei messaggi, avvio automatico con Windows
+- Icona nella barra di sistema, avvio automatico con Windows
+- **Registro dei messaggi** con ricerca (tutte le parole, maiuscole o minuscole indifferenti)
 - Indirizzi broadcast aggiuntivi per raggiungere altre sottoreti
 
 ## Scaricare
@@ -61,13 +73,13 @@ Al primo avvio Windows può chiedere di consentire l'accesso alla rete: consenti
 Nella cartella `%APPDATA%\POPMSG` (Windows), `~/Library/Application Support/POPMSG` (macOS)
 o `~/.config/popmsg` (Linux): impostazioni (`popmsg.ini`), chiave RSA personale (`key.pem`),
 rubrica dei numeri (`rubrica.ini`), gruppi (`gruppi.txt`), utenti conosciuti (`utenti.txt`), messaggi in attesa
-(`in_attesa.txt`) e registro (`popmsg.log`).
+(`in_attesa.txt`), immagini incollate inviate (`appunti`) e ricevute (`immagini`) e registro (`popmsg.log`).
 
 ## Compilare
 
 ```bash
 cargo build --release       # eseguibile in target/release/
-cargo test --release        # protocollo, cifratura e prova completa tra tre istanze
+cargo test --release        # protocollo, cifratura, formato v5 e prove complete tra istanze
 ```
 
 Su Linux servono i pacchetti di sviluppo di X11, Xft, fontconfig e dbus

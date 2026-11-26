@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rsa::RsaPrivateKey;
 
 use crate::crypto::{self, PeerKey};
+use crate::ipdict::{self, Dict};
 use crate::protocol::{self as p, FileInfo, Packet};
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -135,6 +136,8 @@ struct State {
     share_list: bool,
     /// POPMSG a cui abbiamo già chiesto l'elenco in questa sessione
     listed: HashSet<Addr>,
+    /// formato v5 (IPDict) attivo
+    ipdict: bool,
 }
 
 type Notify = Arc<dyn Fn(Event) + Send + Sync>;
@@ -243,6 +246,7 @@ impl Engine {
             local_ips: local_ips(),
             share_list: true,
             listed: HashSet::new(),
+            ipdict: false,
         };
         let eng = Engine {
             st: Arc::new(Mutex::new(st)),
@@ -304,6 +308,9 @@ impl Engine {
         let mut opt = p::CAPUTF8OPT | p::FILEATTACHOPT | p::CLIPBOARDOPT;
         if s.key.is_some() {
             opt |= p::ENCRYPTOPT | p::ENCEXTMSGOPT;
+            if s.ipdict && s.encryption {
+                opt |= p::CAPIPDICTOPT;
+            }
         }
         if s.absent {
             opt |= p::ABSENCEOPT;
@@ -349,6 +356,19 @@ impl Engine {
             s.extra = extra;
         }
         self.broadcast_absence();
+    }
+
+    /// Formato v5 di IP Messenger: messaggi in pacchetti IPDict cifrati e firmati.
+    pub fn set_ipdict(&self, on: bool) {
+        let changed = {
+            let mut s = self.lock();
+            let c = s.ipdict != on;
+            s.ipdict = on;
+            c
+        };
+        if changed {
+            self.broadcast_entry();
+        }
     }
 
     pub fn set_share_list(&self, on: bool) {
@@ -485,12 +505,24 @@ impl Engine {
     }
 
     fn dispatch(&self, a: Addr, no: u64, mut cmd: u32, text: &str, file_list: &str, allow_enc: bool) {
-        let (peer, ext, key) = {
+        let (peer, ext, key, v5) = {
             let s = self.lock();
             let peer = if s.encryption && allow_enc { s.peer_keys.get(&a).cloned() } else { None };
             let ext = s.users.get(&a).map(|u| u.command & p::ENCEXTMSGOPT != 0).unwrap_or(false);
-            (peer, ext, s.key.clone())
+            let v5 = s.ipdict && s.users.get(&a).map(|u| u.command & p::CAPIPDICTOPT != 0).unwrap_or(false);
+            (peer, ext, s.key.clone(), v5)
         };
+        if let (true, Some(peer), Some(me)) = (v5, &peer, &key) {
+            let inner = self.message_dict(no, cmd, text, file_list);
+            match ipdict::encrypt(&inner, me, &peer.key, crypto::OUR_CAPS) {
+                Ok(data) => {
+                    self.send_to(a, &data);
+                    self.lock().pending.insert(no, Pending { data, addr: a, tries: 0, last: Instant::now() });
+                    return;
+                }
+                Err(e) => self.emit(Event::Error(format!("Formato v5 non riuscito: {e}"))),
+            }
+        }
         let mut extra = text.to_string();
         let mut tail: Vec<String> = if file_list.is_empty() { vec![] } else { vec![file_list.to_string()] };
         if let Some(peer) = peer.filter(|pk| crypto::choose_caps(pk) != 0) {
@@ -516,6 +548,46 @@ impl Engine {
         let data = self.packet(no, cmd, &extra, &tail);
         self.send_to(a, &data);
         self.lock().pending.insert(no, Pending { data, addr: a, tries: 0, last: Instant::now() });
+    }
+
+    /// Dizionario interno di un messaggio v5 (come MsgMng::InitIPDict + AddBodyDict).
+    fn message_dict(&self, no: u64, cmd: u32, text: &str, file_list: &str) -> Dict {
+        let (opt, _, _) = self.entry();
+        let s = self.lock();
+        let mut d = Dict::new();
+        d.put_int("VER", ipdict::NEW_VERSION);
+        d.put_int("PKT", no as i64);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        d.put_int("DATE", now as i64);
+        d.put_str("UID", &s.login);
+        d.put_str("HID", &s.host);
+        d.put_int("CMD", p::mode(cmd) as i64);
+        d.put_int("FLG", (cmd & !0xff & !(p::ENCRYPTOPT | p::ENCEXTMSGOPT | p::UTF8OPT)) as i64);
+        d.put_str("CVER", &format!("POPMSG {APP_VERSION}"));
+        d.put_str("GRP", &s.group);
+        let nick = if s.absent { format!("{} [Assente]", s.nick) } else { s.nick.clone() };
+        d.put_str("NCK", &nick);
+        d.put_int("STAT", opt as i64);
+        if !file_list.is_empty() {
+            let files: Vec<Dict> = p::parse_file_list(file_list)
+                .into_iter()
+                .map(|f| {
+                    let mut fd = Dict::new();
+                    fd.put_int("FI", f.id as i64);
+                    fd.put_str("FN", &f.name);
+                    fd.put_int("FS", f.size as i64);
+                    fd.put_int("MT", f.mtime as i64);
+                    fd.put_int("FA", f.attr as i64);
+                    if let Some(pos) = f.pos.filter(|_| f.is_clip()) {
+                        fd.put_int("CP", pos as i64);
+                    }
+                    fd
+                })
+                .collect();
+            d.put_dict_list("FILE", &files);
+        }
+        d.put_str("BODY", text);
+        d
     }
 
     fn flush_key_wait(&self, a: Addr, plain: bool) {
@@ -592,7 +664,9 @@ impl Engine {
         while self.running.load(Ordering::SeqCst) {
             match self.udp.recv_from(&mut buf) {
                 Ok((n, SocketAddr::V4(a))) => {
-                    if let Some(pk) = p::parse(&buf[..n]) {
+                    if ipdict::is_ipdict(&buf[..n]) {
+                        self.on_dict(&buf[..n], a);
+                    } else if let Some(pk) = p::parse(&buf[..n]) {
                         self.handle(pk, a);
                     }
                 }
@@ -600,6 +674,69 @@ impl Engine {
                 Err(_) => {}
             }
             self.tick();
+        }
+    }
+
+    /// Pacchetto v5 (IPDict): lo riporta a un pacchetto classico già decifrato.
+    fn on_dict(&self, data: &[u8], a: Addr) {
+        let key = self.lock().key.clone();
+        let o = match ipdict::open(data, key.as_deref()) {
+            Ok(o) => o,
+            Err(e) => {
+                self.emit(Event::Error(format!("Messaggio v5 da {a} non leggibile: {e}")));
+                return;
+            }
+        };
+        let d = &o.dict;
+        let (Some(no), Some(cmd), Some(user), Some(host)) =
+            (d.get_int("PKT"), d.get_int("CMD"), d.get_str("UID"), d.get_str("HID"))
+        else {
+            return;
+        };
+        let flags = d.get_int("FLG").unwrap_or(0) as u32;
+        let mut command = (cmd as u32 | flags) & !(p::ENCRYPTOPT | p::ENCEXTMSGOPT);
+        let mut tail = vec![];
+        if let Some(list) = d.get_dict_list("FILE") {
+            let files: Vec<FileInfo> = list
+                .iter()
+                .filter_map(|f| {
+                    let attr = f.get_int("FA").unwrap_or(p::FILE_REGULAR as i64) as u32;
+                    Some(FileInfo {
+                        id: f.get_int("FI")? as u32,
+                        name: f.get_str("FN")?,
+                        size: f.get_int("FS").unwrap_or(0) as u64,
+                        mtime: f.get_int("MT").unwrap_or(0) as u64,
+                        attr,
+                        pos: if p::mode(attr) == p::FILE_CLIPBOARD { f.get_int("CP").map(|v| v as u32) } else { None },
+                    })
+                })
+                .collect();
+            if !files.is_empty() {
+                tail.push(p::build_file_list(&files));
+                command |= p::FILEATTACHOPT;
+            }
+        }
+        // chiave del mittente inclusa nel messaggio: utile per rispondere cifrato
+        if let (Some(k), Some(caps)) = (&o.sender_key, d.get_int("EC")) {
+            let mut s = self.lock();
+            if !s.peer_keys.contains_key(&a) {
+                s.peer_keys.insert(a, PeerKey { caps: caps as u32, key: k.clone() });
+            }
+        }
+        let body = d.get_str("BODY").unwrap_or_default();
+        let pk = Packet {
+            packet_no: no as u64,
+            user,
+            host,
+            command: command | p::UTF8OPT,
+            extra: body.clone().into_bytes(),
+            message: body,
+            tail,
+        };
+        if pk.mode() == p::SENDMSG {
+            self.on_message_ex(pk, a, Some((o.encrypted, o.signed)));
+        } else {
+            self.handle(pk, a);
         }
     }
 
@@ -725,6 +862,11 @@ impl Engine {
     }
 
     fn on_message(&self, pk: Packet, a: Addr) {
+        self.on_message_ex(pk, a, None)
+    }
+
+    /// `v5`: per i pacchetti IPDict, già decifrati: (cifrato, firma)
+    fn on_message_ex(&self, pk: Packet, a: Addr, v5: Option<(bool, Option<bool>)>) {
         if pk.has(p::SENDCHECKOPT) && !pk.has(p::AUTORETOPT | p::BROADCASTOPT) {
             self.reply(a, p::RECVMSG, &pk.packet_no.to_string());
         }
@@ -778,6 +920,10 @@ impl Engine {
             if !err.is_empty() {
                 text = format!("[Messaggio cifrato che non è stato possibile decifrare: {err}]");
             }
+        }
+        if let Some((enc, sig)) = v5 {
+            encrypted = enc;
+            signed = sig;
         }
         // caratteri di controllo (tranne a capo e tabulazione) non sono testo
         text.retain(|c| c == '\n' || c == '\t' || !c.is_control());

@@ -919,7 +919,7 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
     let do_open: Rc<dyn Fn()> = {
         let (td, open, buf, opened, c, msg) = (td.clone(), open.clone(), rv.clone(), opened.clone(), ctl.clone(), m.clone());
         let (imgs, fc) = (imgs.clone(), fetch_clips.clone());
-        let (mut col, files) = (col.clone(), files.clone());
+        let (col, files) = (col.clone(), files.clone());
         Rc::new(move || {
             if *opened.borrow() {
                 return;
@@ -937,7 +937,7 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
                 }
             }
             *opened.borrow_mut() = true;
-            let (mut open, mut buf, mut td, mut col) = (open.clone(), buf.clone(), td.clone(), col.clone());
+            let (mut open, mut buf, mut td, col) = (open.clone(), buf.clone(), td.clone(), col.clone());
             open.hide();
             buf.set_text(&msg.text);
             td.show();
@@ -1105,7 +1105,7 @@ fn open_path(p: &Path) {
 // ============================================================ impostazioni
 fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     let cfg = ctl.cfg.borrow().clone();
-    let mut win = Window::default().with_size(500, 620).with_label("Impostazioni di POPMSG").center_screen();
+    let mut win = Window::default().with_size(500, 650).with_label("Impostazioni di POPMSG").center_screen();
     let mut col = Flex::default_fill().column();
     col.set_margin(10);
     col.set_pad(6);
@@ -1135,6 +1135,7 @@ fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     let quote = check("Cita il messaggio quando rispondi", cfg.quote, &mut col);
     let seal = check("Sigilla i messaggi per impostazione predefinita", cfg.seal, &mut col);
     let enc = check("Cifra i messaggi (RSA 2048 + AES 256)", cfg.encryption, &mut col);
+    let v5 = check("Usa il formato v5 di IP Messenger (sperimentale)", cfg.ipdict, &mut col);
     let offline = check("Mostra in grigio chi non è in linea e tieni i messaggi in attesa", cfg.offline, &mut col);
     let share = check("Scambia automaticamente l'elenco utenti con gli altri POPMSG", cfg.share_list, &mut col);
     let log = check("Registra i messaggi su file", cfg.log_enabled, &mut col);
@@ -1220,6 +1221,7 @@ fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     c.offline = offline.value();
     c.log_enabled = log.value();
     c.share_list = share.value();
+    c.ipdict = v5.value();
     c.password_all = pw_all.value();
     if let Some(pw) = new_pw.borrow().as_ref() {
         c.password = if pw.is_empty() { String::new() } else { config::password_hash(pw) };
@@ -1593,6 +1595,7 @@ impl Ctl {
                     let c = self.cfg.borrow().clone();
                     self.engine.set_encryption(c.encryption);
                     self.engine.set_share_list(c.share_list);
+                    self.engine.set_ipdict(c.ipdict);
                     self.engine.set_identity(&c.nick, &c.group, c.extra.clone());
                     if c.port != old.port {
                         notice("POPMSG", "La nuova porta sarà usata al prossimo avvio.");

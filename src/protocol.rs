@@ -41,6 +41,8 @@ pub const UTF8OPT: u32 = 0x0080_0000;
 pub const CAPUTF8OPT: u32 = 0x0100_0000;
 pub const ENCEXTMSGOPT: u32 = 0x0400_0000;
 pub const CLIPBOARDOPT: u32 = 0x0800_0000;
+/// supporta i pacchetti in formato v5 (IPDict, "IP2:")
+pub const CAPIPDICTOPT: u32 = 0x0200_0000;
 
 // ---- opzioni di SENDMSG ----
 pub const SENDCHECKOPT: u32 = 0x0000_0100;

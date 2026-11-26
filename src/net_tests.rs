@@ -123,3 +123,36 @@ fn end_to_end() {
     until(|| !b.users().iter().any(|u| u.nick == "Alice"));
     b.stop();
 }
+
+#[test]
+fn formato_v5() {
+    let (a, _ra) = eng("Anna", 25311, &[25312], true);
+    let (b, rb) = eng("Beppe", 25312, &[25311], true);
+    a.set_ipdict(true);
+    b.set_ipdict(true);
+    until(|| {
+        a.broadcast_entry();
+        a.users().iter().any(|u| u.nick == "Beppe" && u.command & p::CAPIPDICTOPT != 0)
+            && b.users().iter().any(|u| u.nick == "Anna" && u.command & p::CAPIPDICTOPT != 0)
+    });
+    std::thread::sleep(Duration::from_millis(400)); // scambio delle chiavi
+    let ub = a.users().into_iter().find(|u| u.nick == "Beppe").unwrap();
+    let src = std::env::temp_dir().join(format!("popmsg-v5-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&src);
+    std::fs::create_dir_all(&src).unwrap();
+    let clip = src.join(crate::net::clip_name(3));
+    std::fs::write(&clip, b"png finto").unwrap();
+    a.send_message(&[ub], "Ciao in v5: è ok", 1, &[clip]);
+    let m = msg(&rb);
+    assert_eq!(m.text, "Ciao in v5: è ok");
+    assert!(m.encrypted && m.sealed());
+    assert_eq!(m.signed, Some(true));
+    assert_eq!(m.files.len(), 1);
+    assert!(m.files[0].is_clip() && m.files[0].pos == Some(3));
+    let dest = src.join("dst");
+    std::fs::create_dir_all(&dest).unwrap();
+    let f = b.download(&m, &m.files[0], &dest, &mut |_, _, _| {}, &AtomicBool::new(false)).unwrap();
+    assert_eq!(std::fs::read(f).unwrap(), b"png finto");
+    a.stop();
+    b.stop();
+}
