@@ -85,6 +85,10 @@ pub enum Event {
     Failed(u64, Addr),
     AbsenceInfo(String, String),
     VersionInfo(String, String),
+    /// un altro POPMSG chiede il nostro elenco utenti
+    ListRequest(Addr),
+    /// elenco utenti ricevuto da un altro POPMSG
+    ListReceived(Addr, String),
     Error(String),
 }
 
@@ -126,6 +130,9 @@ struct State {
     peer_keys: HashMap<Addr, PeerKey>,
     key_wait: HashMap<Addr, Vec<Queued>>,
     local_ips: HashSet<Ipv4Addr>,
+    share_list: bool,
+    /// POPMSG a cui abbiamo già chiesto l'elenco in questa sessione
+    listed: HashSet<Addr>,
 }
 
 type Notify = Arc<dyn Fn(Event) + Send + Sync>;
@@ -232,6 +239,8 @@ impl Engine {
             peer_keys: HashMap::new(),
             key_wait: HashMap::new(),
             local_ips: local_ips(),
+            share_list: true,
+            listed: HashSet::new(),
         };
         let eng = Engine {
             st: Arc::new(Mutex::new(st)),
@@ -338,6 +347,23 @@ impl Engine {
             s.extra = extra;
         }
         self.broadcast_absence();
+    }
+
+    pub fn set_share_list(&self, on: bool) {
+        self.lock().share_list = on;
+    }
+
+    /// Risponde a una richiesta di elenco utenti (testo già pronto, una riga per utente).
+    pub fn send_list(&self, a: Addr, text: &str) {
+        if !self.lock().share_list {
+            return;
+        }
+        // resta dentro un pacchetto UDP
+        let mut t = text;
+        while t.len() > 60_000 {
+            t = &t[..t[..60_000].rfind('\n').unwrap_or(0)];
+        }
+        self.reply(a, p::POPMSG_ANSLIST, t);
     }
 
     pub fn set_encryption(&self, on: bool) {
@@ -579,6 +605,15 @@ impl Engine {
             );
         }
         self.emit(Event::UsersChanged);
+        // altro POPMSG appena visto: scambiamo gli elenchi degli utenti conosciuti
+        let ask = {
+            let mut s = self.lock();
+            let me = s.local_ips.contains(a.ip()) && a.port() == s.port;
+            s.share_list && !me && p::is_popmsg(pk) && s.listed.insert(a)
+        };
+        if ask {
+            self.reply(a, p::POPMSG_GETLIST, "");
+        }
     }
 
     fn user_or_stub(&self, pk: &Packet, a: Addr) -> User {
@@ -602,6 +637,16 @@ impl Engine {
                 self.send_to(a, &d);
             }
             p::ANSENTRY | p::BR_ABSENCE => self.update_user(&pk, a),
+            p::POPMSG_GETLIST => {
+                if self.lock().share_list {
+                    self.emit(Event::ListRequest(a));
+                }
+            }
+            p::POPMSG_ANSLIST => {
+                if self.lock().share_list {
+                    self.emit(Event::ListReceived(a, pk.message.clone()));
+                }
+            }
             p::BR_EXIT => {
                 if self.lock().users.remove(&a).is_some() {
                     self.emit(Event::UsersChanged);

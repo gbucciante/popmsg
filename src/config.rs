@@ -628,6 +628,29 @@ pub fn known_rekey(old: &str, new: &str) {
     }
 }
 
+/// Elenco degli utenti conosciuti da mandare a un altro POPMSG (senza Tel).
+pub fn known_list_text() -> String {
+    known_all()
+        .iter()
+        .map(|k| [&k.key, &k.login, &k.host, &k.nick, &k.group, &k.addr].iter().map(|f| esc_field(f)).collect::<Vec<_>>().join("\t") + "\n")
+        .collect()
+}
+
+/// Aggiunge gli utenti sconosciuti di un elenco ricevuto; restituisce quanti.
+pub fn known_merge_text(text: &str) -> usize {
+    let have: std::collections::HashSet<String> = known_all().into_iter().map(|k| k.key).collect();
+    let new: Vec<Known> = text
+        .lines()
+        .map(|l| l.split('\t').map(unesc_field).collect::<Vec<_>>())
+        .filter(|r| r.len() >= 6 && !r[0].is_empty() && !have.contains(&r[0]))
+        // un utente aggiunto a mano da altri che qui conosciamo già con la chiave vera
+        .filter(|r| !(r[0].starts_with(MANUAL_PREFIX) && known_all().iter().any(|k| k.host.eq_ignore_ascii_case(&r[2]))))
+        .map(|r| Known { key: r[0].clone(), login: r[1].clone(), host: r[2].clone(), nick: r[3].clone(), group: r[4].clone(), addr: r[5].clone() })
+        .collect();
+    known_update(&new);
+    new.len()
+}
+
 const EXPORT_HEADER: &str = "# POPMSG elenco utenti";
 
 /// Scrive l'elenco degli utenti conosciuti in un file da passare agli altri PC,

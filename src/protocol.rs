@@ -27,6 +27,9 @@ pub const RELEASEFILES: u32 = 0x61;
 pub const GETDIRFILES: u32 = 0x62;
 pub const GETPUBKEY: u32 = 0x72;
 pub const ANSPUBKEY: u32 = 0x73;
+/// estensione POPMSG (ignorata da IP Messenger): scambio dell'elenco utenti
+pub const POPMSG_GETLIST: u32 = 0xF0;
+pub const POPMSG_ANSLIST: u32 = 0xF1;
 
 // ---- opzioni generali ----
 pub const ABSENCEOPT: u32 = 0x0000_0100;
@@ -168,8 +171,13 @@ pub fn parse(data: &[u8]) -> Option<Packet> {
 pub fn entry_extra(nick: &str, group: &str, user: &str, host: &str) -> (String, Vec<String>) {
     (
         nick.to_string(),
-        vec![group.to_string(), format!("\nUN:{user}\nHN:{host}\nNN:{nick}\nGN:{group}\n")],
+        vec![group.to_string(), format!("\nUN:{user}\nHN:{host}\nNN:{nick}\nGN:{group}\nPM:2\n")],
     )
+}
+
+/// Il mittente dell'annuncio è un POPMSG (sa scambiare l'elenco utenti)?
+pub fn is_popmsg(p: &Packet) -> bool {
+    p.tail.iter().skip(1).any(|t| t.contains("\nPM:"))
 }
 
 pub fn parse_entry(p: &Packet) -> (String, String) {

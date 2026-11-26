@@ -1433,6 +1433,7 @@ impl Ctl {
                 if settings_dialog(self) {
                     let c = self.cfg.borrow().clone();
                     self.engine.set_encryption(c.encryption);
+                    self.engine.set_share_list(c.share_list);
                     self.engine.set_identity(&c.nick, &c.group, c.extra.clone());
                     if c.port != old.port {
                         notice("POPMSG", "La nuova porta sarà usata al prossimo avvio.");
@@ -1493,6 +1494,13 @@ pub fn handle_net(ctl: &Rc<Ctl>, ev: crate::net::Event) {
         E::Failed(no, _) => ctl.on_failed(no),
         E::AbsenceInfo(n, t) => notice(&format!("Assenza di {n}"), &t),
         E::VersionInfo(n, t) => notice(&format!("Versione di {n}"), &t),
+        E::ListRequest(a) => ctl.engine.send_list(a, &config::known_list_text()),
+        E::ListReceived(_, text) => {
+            if config::known_merge_text(&text) > 0 {
+                ctl.probe_known();
+                ctl.users_changed();
+            }
+        }
         E::Error(e) => eprintln!("{e}"),
     }
 }

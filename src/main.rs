@@ -56,6 +56,7 @@ fn main() {
         }
     };
     engine.set_absence(false, Some(&cfg.absence_text));
+    engine.set_share_list(cfg.share_list);
     let ctl = ui::Ctl::new(engine, cfg);
     ctl.probe_known();
 
