@@ -817,11 +817,20 @@ impl Engine {
             }
             p::READMSG => {
                 let no = num();
+                // IP Messenger ripete l'avviso finché la conferma non riporta il numero
+                // del pacchetto READMSG stesso (non quello del messaggio letto)
                 if pk.has(p::READCHECKOPT) {
-                    self.reply(a, p::ANSREADMSG, &no.to_string());
+                    self.reply(a, p::ANSREADMSG, &pk.packet_no.to_string());
                 }
-                let name = self.user_or_stub(&pk, a).name().to_string();
-                self.emit(Event::Opened(no, name));
+                // un solo avviso per messaggio, anche se arriva più volte
+                let first = {
+                    let mut s = self.lock();
+                    s.recent.insert((a, no | 1 << 63), Instant::now()).is_none()
+                };
+                if first {
+                    let name = self.user_or_stub(&pk, a).name().to_string();
+                    self.emit(Event::Opened(no, name));
+                }
             }
             p::GETINFO => self.reply(a, p::SENDINFO, &format!("POPMSG {APP_VERSION}")),
             p::SENDINFO => {

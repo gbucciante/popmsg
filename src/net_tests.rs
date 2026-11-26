@@ -76,6 +76,14 @@ fn end_to_end() {
     wait(&ra, |e| matches!(e, Event::Delivered(n) if *n == no).then_some(()));
     b.mark_read(&m);
     wait(&ra, |e| matches!(e, Event::Opened(n, _) if *n == no).then_some(()));
+    // l'avviso ripetuto (come fa IP Messenger) non apre una seconda finestra
+    b.mark_read(&m);
+    let end = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < end {
+        if let Ok(Event::Opened(n, _)) = ra.recv_timeout(Duration::from_millis(50)) {
+            assert_ne!(n, no, "avviso di apertura duplicato");
+        }
+    }
 
     // assenza
     b.set_absence(true, Some("Torno alle 15"));
