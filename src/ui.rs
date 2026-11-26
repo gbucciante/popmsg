@@ -221,7 +221,10 @@ pub struct SendWin {
 
 impl SendWin {
     pub fn new(ctl: &Rc<Ctl>, select: &[String], text: &str) -> Rc<SendWin> {
-        let mut win = Window::default().with_size(640, 430).with_label("Invia messaggio").center_screen();
+        let mut win = Window::default()
+            .with_size(640, 430)
+            .with_label(&format!("POPMSG {} - Invia messaggio", crate::net::APP_VERSION))
+            .center_screen();
         win.make_resizable(true);
         let mut col = Flex::default_fill().column();
         col.set_margin(6);
@@ -291,6 +294,8 @@ impl SendWin {
             seal.set_callback(move |s| if s.value() { l.activate() } else { l.set_value(false); l.deactivate() });
         }
         Frame::default();
+        let mut chat = Button::default().with_label("Chat");
+        chat.set_tooltip("Apri una chat di gruppo con gli utenti selezionati");
         let mut send = ReturnButton::default().with_label("Invia");
         send.set_label_font(Font::HelveticaBold);
         bottom.fixed(&attach, 80);
@@ -298,6 +303,7 @@ impl SendWin {
         bottom.fixed(&emo, 40);
         bottom.fixed(&seal, 75);
         bottom.fixed(&lock, 95);
+        bottom.fixed(&chat, 60);
         bottom.fixed(&send, 120);
         bottom.end();
 
@@ -447,6 +453,14 @@ impl SendWin {
             send.set_callback(move |_| f());
         }
         {
+            let (s, c) = (Rc::downgrade(&sw), ctl.clone());
+            chat.set_callback(move |_| {
+                let Some(s) = s.upgrade() else { return };
+                let users: Vec<User> = s.list.selected_keys().iter().filter_map(|k| c.target(k)).filter(|t| t.1).map(|t| t.0).collect();
+                start_chat_dialog(&c, users);
+            });
+        }
+        {
             let f = do_send.clone();
             let s = Rc::downgrade(&sw);
             let col = col.clone();
@@ -489,16 +503,16 @@ impl SendWin {
             let s = sw.clone();
             let mut col = col.clone();
             let mut w = win.clone();
-            w.handle(move |_, ev| match ev {
-                Event::DndEnter | Event::DndDrag | Event::DndRelease => true,
+            w.handle(move |w, ev| match ev {
+                // la finestra riceve il rilascio (e quindi l'elenco dei file) anche sopra
+                // la lista utenti o il testo: FLTK lo consegna al widget "sotto il mouse"
+                Event::DndEnter | Event::DndDrag => {
+                    app::set_belowmouse(w);
+                    true
+                }
+                Event::DndLeave | Event::DndRelease => true,
                 Event::Paste => {
-                    let paths: Vec<PathBuf> = app::event_text()
-                        .lines()
-                        .map(|l| l.trim().trim_start_matches("file://"))
-                        .filter(|l| !l.is_empty())
-                        .map(|l| PathBuf::from(percent_decode(l)))
-                        .filter(|p| p.exists())
-                        .collect();
+                    let paths = dropped_paths(&app::event_text());
                     if paths.is_empty() {
                         false
                     } else {
@@ -514,7 +528,12 @@ impl SendWin {
             let (s, c) = (Rc::downgrade(&sw), ctl.clone());
             sw.list.set_menu(move || {
                 let Some(s) = s.upgrade() else { return };
-                let menu = fltk::menu::MenuItem::new(&["Modifica Tel…", "Aggiungi utente…", "Importa elenco utenti…", "Esporta elenco utenti…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Informazioni su POPMSG"]);
+                let menu = fltk::menu::MenuItem::new(&["POPMSG ", "Chat di gruppo con i selezionati…", "Stato (disponibile, assente, occupato)…", "Modifica Tel…", "Aggiungi utente…", "Importa elenco utenti…", "Esporta elenco utenti…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Informazioni su POPMSG"]);
+                if let Some(mut v) = menu.at(0) {
+                    v.set_label(&format!("POPMSG {}", crate::net::APP_VERSION));
+                    v.deactivate();
+                    v.set_flag(fltk::menu::MenuFlag::MenuDivider);
+                }
                 if let Some(item) = menu.popup(app::event_x(), app::event_y()) {
                     let targets: Vec<(User, bool)> = s.list.selected_keys().iter().filter_map(|k| c.target(k)).collect();
                     let sel: Vec<User> = targets.iter().filter(|t| t.1).map(|t| t.0.clone()).collect();
@@ -532,6 +551,9 @@ impl SendWin {
                             }
                         }
                         "Aggiorna elenco" => c.refresh_all(),
+                        "Chat di gruppo con i selezionati…" => start_chat_dialog(&c, sel.clone()),
+                        "Stato (disponibile, assente, occupato)…" => status_dialog(&c),
+                        l if l.starts_with("POPMSG ") => {}
                         "Aggiungi utente…" => add_user_dialog(&c),
                         "Esporta elenco utenti…" => {
                             let Some(choice) = dialog::choice2_default("Esportare anche i numeri di Tel?", "Annulla", "Senza Tel", "Con i numeri di Tel") else { return };
@@ -661,8 +683,8 @@ impl SendWin {
                 };
                 let name = if !*online {
                     format!("{} (non in linea)", u.name())
-                } else if u.absent() {
-                    format!("{} (assente)", u.name())
+                } else if let Some(st) = u.status() {
+                    format!("{} ({st})", u.base_nick())
                 } else {
                     u.name().to_string()
                 };
@@ -777,6 +799,21 @@ fn save_clip_png(img: &fltk::image::RgbImage, pos: u32) -> Result<PathBuf, Strin
     let mut wr = enc.write_header().map_err(|e| e.to_string())?;
     wr.write_image_data(&data).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// Percorsi dei file trascinati (un percorso o un URI file:// per riga).
+fn dropped_paths(text: &str) -> Vec<PathBuf> {
+    text.lines()
+        .map(|l| l.trim().trim_start_matches("file://"))
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let l = percent_decode(l);
+            // file:///C:/... su Windows
+            if cfg!(windows) && l.starts_with('/') && l.get(2..3) == Some(":") { l[1..].to_string() } else { l }
+        })
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect()
 }
 
 fn percent_decode(s: &str) -> String {
@@ -1347,6 +1384,7 @@ pub struct Ctl {
     absence_sel: RefCell<Option<usize>>,
     downloaded: Arc<std::sync::Mutex<HashMap<u64, usize>>>,
     inflight: RefCell<HashMap<u64, u64>>,
+    chats: RefCell<HashMap<String, Rc<ChatWin>>>,
 }
 
 impl Ctl {
@@ -1361,6 +1399,7 @@ impl Ctl {
             absence_sel: RefCell::new(None),
             downloaded: Arc::new(std::sync::Mutex::new(HashMap::new())),
             inflight: RefCell::new(HashMap::new()),
+            chats: RefCell::new(HashMap::new()),
         })
     }
 
@@ -1400,7 +1439,7 @@ impl Ctl {
                     key: u.book_key(),
                     login: u.login.clone(),
                     host: u.host.clone(),
-                    nick: u.nick.trim_end_matches(" [Assente]").to_string(),
+                    nick: u.base_nick().to_string(),
                     group: u.group.clone(),
                     addr: u.addr.to_string(),
                 })
@@ -1510,6 +1549,10 @@ impl Ctl {
     }
 
     pub fn on_message(self: &Rc<Self>, m: Message) {
+        if p::mode(m.command) == p::POPMSG_CHAT {
+            self.on_chat(m);
+            return;
+        }
         let (log, path, sound, popup) = {
             let c = self.cfg.borrow();
             (c.log_enabled, c.log_path.clone(), c.sound, c.popup)
@@ -1588,6 +1631,13 @@ impl Ctl {
                     _ => self.update_tray(),
                 }
             }
+            TrayCmd::Busy => {
+                let cur = self.cfg.borrow().busy_text.clone();
+                match dialog::input_default("Messaggio di risposta automatica (Occupato):", &cur) {
+                    Some(t) if !t.trim().is_empty() => self.set_status(2, t),
+                    _ => self.update_tray(),
+                }
+            }
             TrayCmd::Log => log_viewer(&self.cfg.borrow().log_path.clone()),
             TrayCmd::Settings => {
                 let old = self.cfg.borrow().clone();
@@ -1611,6 +1661,36 @@ impl Ctl {
                 ),
             ),
             TrayCmd::Quit => self.quit(),
+        }
+    }
+
+    /// 0 = disponibile, 1 = assente, 2 = occupato, con il messaggio di risposta automatica.
+    pub fn set_status(&self, kind: u8, text: String) {
+        match kind {
+            0 => self.set_absence(None, None),
+            1 => {
+                let i = ABSENCE_PRESETS.iter().position(|p| p.1 == text).unwrap_or(ABSENCE_PRESETS.len());
+                self.set_absence(Some(i), Some(text))
+            }
+            _ => {
+                {
+                    let mut c = self.cfg.borrow_mut();
+                    c.busy_text = text.clone();
+                    c.save();
+                }
+                self.engine.set_status(true, "Occupato", Some(&text));
+                *self.absence_sel.borrow_mut() = Some(ABSENCE_PRESETS.len() + 1);
+                self.update_tray();
+            }
+        }
+    }
+
+    /// 0 = disponibile, 1 = assente, 2 = occupato
+    pub fn status_kind(&self) -> u8 {
+        match *self.absence_sel.borrow() {
+            None => 0,
+            Some(i) if i == ABSENCE_PRESETS.len() + 1 => 2,
+            Some(_) => 1,
         }
     }
 
@@ -1670,4 +1750,293 @@ pub fn handle_net(ctl: &Rc<Ctl>, ev: crate::net::Event) {
 #[allow(dead_code)]
 pub fn start_tray(ctl: &Rc<Ctl>, tx: app::Sender<crate::Msg>) {
     *ctl.tray.borrow_mut() = tray::start(tx);
+}
+
+// ============================================================ stato
+/// Disponibile / Assente / Occupato, con il messaggio di risposta automatica.
+fn status_dialog(ctl: &Rc<Ctl>) {
+    use fltk::button::RadioRoundButton;
+    let mut w = Window::default().with_size(440, 190).with_label("Stato").center_screen();
+    let mut col = Flex::default_fill().column();
+    col.set_margin(10);
+    col.set_pad(6);
+    let row = Flex::default().row();
+    let names = ["Disponibile", "Assente", "Occupato"];
+    let radios: Vec<RadioRoundButton> = names.iter().map(|n| RadioRoundButton::default().with_label(n)).collect();
+    row.end();
+    col.fixed(&row, 26);
+    let mut l = Frame::default().with_label("Risposta automatica a chi ti scrive:");
+    l.set_align(Align::Inside | Align::Left);
+    col.fixed(&l, 20);
+    let mut input = Input::default();
+    col.fixed(&input, 28);
+    Frame::default();
+    let mut bot = Flex::default().row();
+    Frame::default();
+    let mut cancel = Button::default().with_label("Annulla");
+    let mut ok = ReturnButton::default().with_label("OK");
+    bot.fixed(&cancel, 90);
+    bot.fixed(&ok, 90);
+    bot.end();
+    col.fixed(&bot, 30);
+    col.end();
+    w.end();
+    setup_window(&mut w);
+
+    let texts = {
+        let c = ctl.cfg.borrow();
+        Rc::new(RefCell::new(["".to_string(), c.absence_text.clone(), c.busy_text.clone()]))
+    };
+    let kind = Rc::new(RefCell::new(ctl.status_kind()));
+    let show = {
+        let (texts, input) = (texts.clone(), input.clone());
+        move |k: u8| {
+            let mut input = input.clone();
+            input.set_value(&texts.borrow()[k as usize]);
+            if k == 0 { input.deactivate() } else { input.activate() }
+        }
+    };
+    for (i, mut r) in radios.into_iter().enumerate() {
+        r.set_value(i as u8 == *kind.borrow());
+        let (kind, texts, input, show) = (kind.clone(), texts.clone(), input.clone(), show.clone());
+        r.set_callback(move |_| {
+            let old = *kind.borrow();
+            if old > 0 {
+                texts.borrow_mut()[old as usize] = input.value();
+            }
+            *kind.borrow_mut() = i as u8;
+            show(i as u8);
+        });
+    }
+    show(*kind.borrow());
+    {
+        let mut w2 = w.clone();
+        cancel.set_callback(move |_| w2.do_callback());
+    }
+    {
+        let (c, mut w2, input) = (ctl.clone(), w.clone(), input.clone());
+        ok.set_callback(move |_| {
+            let k = *kind.borrow();
+            let mut t = input.value().trim().to_string();
+            if t.is_empty() {
+                t = if k == 2 { config::BUSY_TEXT.to_string() } else { ABSENCE_PRESETS[0].1.to_string() };
+            }
+            c.set_status(k, t);
+            w2.do_callback();
+        });
+    }
+    w.make_modal(true);
+    w.show();
+    let _ = input.take_focus();
+}
+
+// ============================================================ chat di gruppo
+const CHAT_TAG: &str = "POPMSGCHAT";
+
+pub struct ChatWin {
+    id: String,
+    title: String,
+    /// gli altri partecipanti
+    members: RefCell<Vec<Addr>>,
+    win: Window,
+    view: RefCell<crate::rich::RichView>,
+    text: RefCell<String>,
+    who: Frame,
+}
+
+impl ChatWin {
+    fn header(&self) -> String {
+        let m: Vec<String> = self.members.borrow().iter().map(|a| a.to_string()).collect();
+        format!("{CHAT_TAG}\t{}\t{}\t{}", self.id, self.title, m.join(","))
+    }
+
+    fn update_who(&self, ctl: &Ctl) {
+        let names: Vec<String> = self
+            .members
+            .borrow()
+            .iter()
+            .map(|a| ctl.engine.user(a).map(|u| u.base_nick().to_string()).unwrap_or_else(|| a.ip().to_string()))
+            .collect();
+        let mut w = self.who.clone();
+        w.set_label(&lbl(&format!("Con: {}", names.join(", "))));
+    }
+
+    fn append(&self, who: &str, body: &str) {
+        let mut t = self.text.borrow_mut();
+        t.push_str(&format!("{who}   {}\n{}\n\n", chrono::Local::now().format("%H:%M"), body.trim_end()));
+        let mut v = self.view.borrow_mut();
+        v.set_text(&t);
+        v.scroll_to_end();
+    }
+
+    fn send(&self, ctl: &Ctl, text: &str) {
+        let users: Vec<User> = self
+            .members
+            .borrow()
+            .iter()
+            .map(|a| {
+                ctl.engine.user(a).unwrap_or_else(|| User {
+                    addr: *a,
+                    login: String::new(),
+                    host: String::new(),
+                    nick: a.ip().to_string(),
+                    group: String::new(),
+                    command: 0,
+                })
+            })
+            .collect();
+        ctl.engine.send_chat(&users, &self.header(), &self.title, text);
+        self.append("Io", text);
+        let cfg = ctl.cfg.borrow();
+        if cfg.log_enabled {
+            config::write_log(&cfg.log_path, "A", &format!("Chat «{}»", self.title), text, &[], &[]);
+        }
+    }
+}
+
+/// Apre (o riporta in primo piano) la finestra di una chat.
+fn chat_window(ctl: &Rc<Ctl>, id: &str, title: &str, members: Vec<Addr>) -> Rc<ChatWin> {
+    if let Some(cw) = ctl.chats.borrow().get(id).cloned() {
+        {
+            let mut m = cw.members.borrow_mut();
+            for a in members {
+                if !m.contains(&a) {
+                    m.push(a);
+                }
+            }
+        }
+        cw.update_who(ctl);
+        let mut w = cw.win.clone();
+        if !w.shown() {
+            w.show();
+        }
+        return cw;
+    }
+    let mut win = Window::default().with_size(480, 460).with_label(&lbl(&format!("Chat «{title}»"))).center_screen();
+    win.make_resizable(true);
+    let mut col = Flex::default_fill().column();
+    col.set_margin(6);
+    col.set_pad(4);
+    let mut who = Frame::default();
+    who.set_align(Align::Inside | Align::Left | Align::Clip);
+    who.set_label_size(12);
+    col.fixed(&who, 20);
+    let view = crate::rich::RichView::new();
+    let buf = TextBuffer::default();
+    let mut ed = TextEditor::default();
+    ed.set_buffer(buf.clone());
+    ed.wrap_mode(WrapMode::AtBounds, 0);
+    ed.set_text_size(14);
+    ed.set_scrollbar_size(12);
+    col.fixed(&ed, 70);
+    let mut bottom = Flex::default().row();
+    let mut emo = Button::default();
+    emo.set_image(crate::rich::emoji_index("😊").and_then(|i| crate::rich::emoji_image(i, 20)));
+    emo.set_tooltip("Emoticon");
+    let mut hint = Frame::default().with_label("Invio per inviare, Maiusc+Invio per andare a capo");
+    hint.set_label_size(11);
+    hint.set_align(Align::Inside | Align::Left);
+    let mut send = Button::default().with_label("Invia");
+    send.set_label_font(Font::HelveticaBold);
+    bottom.fixed(&emo, 40);
+    bottom.fixed(&send, 100);
+    bottom.end();
+    col.fixed(&bottom, 30);
+    col.end();
+    win.end();
+    win.set_icon(icon());
+    // chiudere nasconde soltanto: un nuovo messaggio riapre la stessa chat
+    win.set_callback(|w| w.hide());
+
+    let cw = Rc::new(ChatWin {
+        id: id.to_string(),
+        title: title.to_string(),
+        members: RefCell::new(members),
+        win: win.clone(),
+        view: RefCell::new(view),
+        text: RefCell::new(String::new()),
+        who,
+    });
+    cw.update_who(ctl);
+    let do_send: Rc<dyn Fn()> = {
+        let (cw, c, buf) = (Rc::downgrade(&cw), ctl.clone(), buf.clone());
+        Rc::new(move || {
+            let Some(cw) = cw.upgrade() else { return };
+            let t = buf.text().trim_end().to_string();
+            if t.trim().is_empty() {
+                return;
+            }
+            buf.clone().set_text("");
+            cw.send(&c, &t);
+        })
+    };
+    {
+        let f = do_send.clone();
+        send.set_callback(move |_| f());
+    }
+    {
+        let f = do_send.clone();
+        ed.super_handle_first(false);
+        ed.handle(move |_, ev| {
+            if ev == Event::KeyDown
+                && matches!(app::event_key(), Key::Enter | Key::KPEnter)
+                && !app::event_state().contains(Shortcut::Shift)
+            {
+                f();
+                return true;
+            }
+            false
+        });
+    }
+    {
+        let ed2 = ed.clone();
+        emo.set_callback(move |_| emoji_picker(ed2.clone()));
+    }
+    win.show();
+    let _ = ed.take_focus();
+    ctl.chats.borrow_mut().insert(id.to_string(), cw.clone());
+    cw
+}
+
+/// Nuova chat con gli utenti scelti.
+fn start_chat_dialog(ctl: &Rc<Ctl>, users: Vec<User>) {
+    let users: Vec<User> = users.into_iter().filter(|u| !ctl.engine.is_me(&u.addr)).collect();
+    if users.is_empty() {
+        dialog::alert_default("Seleziona prima gli utenti in linea con cui aprire la chat.");
+        return;
+    }
+    let me = ctl.cfg.borrow().nick.clone();
+    let mut names: Vec<&str> = vec![me.as_str()];
+    names.extend(users.iter().map(|u| u.base_nick()));
+    let def = if names.len() <= 3 { names.join(", ") } else { format!("{} e altri {}", names[..2].join(", "), names.len() - 2) };
+    let Some(title) = dialog::input_default("Titolo della chat di gruppo:", &def) else { return };
+    let title: String = title.trim().chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let title = if title.is_empty() { def } else { title };
+    let id = format!("{:x}{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0), p::next_packet_no() & 0xffff);
+    chat_window(ctl, &id, &title, users.iter().map(|u| u.addr).collect());
+}
+
+impl Ctl {
+    fn on_chat(self: &Rc<Self>, m: Message) {
+        let (head, body) = m.text.split_once('\n').unwrap_or((&m.text, ""));
+        let f: Vec<&str> = head.split('\t').collect();
+        if f.len() < 4 || f[0] != CHAT_TAG || f[1].is_empty() {
+            return;
+        }
+        let mut members: Vec<Addr> = f[3].split(',').filter_map(|a| a.trim().parse().ok()).collect();
+        members.push(m.sender.addr);
+        members.retain(|a| !self.engine.is_me(a));
+        members.dedup();
+        let title = if f[2].is_empty() { "chat" } else { f[2] };
+        let cw = chat_window(self, f[1], title, members);
+        cw.append(m.sender.base_nick(), body);
+        let cfg = self.cfg.borrow();
+        if cfg.log_enabled {
+            let s = &m.sender;
+            config::write_log(&cfg.log_path, "Da", &format!("{} ({}/{}) in chat «{title}»", s.base_nick(), s.group, s.host), body, &[], &[]);
+        }
+        if cfg.sound {
+            dialog::beep(dialog::BeepType::Message);
+        }
+    }
 }

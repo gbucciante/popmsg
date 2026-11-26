@@ -251,6 +251,13 @@ impl RichView {
         self.relayout();
     }
 
+    /// Porta in vista la fine del testo (chat).
+    pub fn scroll_to_end(&mut self) {
+        let y = (self.canvas.h() - self.scroll.h() + 4).max(0);
+        self.scroll.scroll_to(0, y);
+        self.scroll.redraw();
+    }
+
     fn relayout(&mut self) {
         let s = &self.scroll;
         let w = s.w() - 4 - s.scrollbar_size();

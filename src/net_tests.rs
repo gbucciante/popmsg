@@ -164,3 +164,31 @@ fn formato_v5() {
     a.stop();
     b.stop();
 }
+
+#[test]
+fn chat_e_stato() {
+    let (a, _ra) = eng("Anna", 25321, &[25322], true);
+    let (b, rb) = eng("Beppe", 25322, &[25321], true);
+    until(|| {
+        a.broadcast_entry();
+        let ub = a.users().into_iter().find(|u| u.nick == "Beppe");
+        ub.map(|u| a.is_popmsg(&u.addr)).unwrap_or(false) && b.users().iter().any(|u| u.nick == "Anna")
+    });
+    std::thread::sleep(Duration::from_millis(400));
+    let ub = a.users().into_iter().find(|u| u.nick == "Beppe").unwrap();
+    assert!(!a.is_me(&ub.addr));
+    let header = format!("POPMSGCHAT\tid1\tProva\t{}", ub.addr);
+    a.send_chat(&[ub.clone()], &header, "Prova", "ciao a tutti");
+    let m = msg(&rb);
+    assert_eq!(p::mode(m.command), p::POPMSG_CHAT);
+    assert_eq!(m.text, format!("{header}\nciao a tutti"));
+    assert!(m.encrypted);
+
+    // stato occupato con messaggio personalizzato
+    b.set_status(true, "Occupato", Some("In call"));
+    until(|| a.user(&ub.addr).map(|u| u.status() == Some("occupato") && u.base_nick() == "Beppe").unwrap_or(false));
+    b.set_status(true, "Assente", None);
+    until(|| a.user(&ub.addr).map(|u| u.status() == Some("assente")).unwrap_or(false));
+    a.stop();
+    b.stop();
+}

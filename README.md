@@ -51,8 +51,14 @@ librerie di sistema comprese). Funziona su **Windows**, **macOS** e **Linux**.
 - **Immagini incollate** dagli appunti con Ctrl+V nel testo: partono come immagini di
   IP Messenger e chi riceve le vede come miniature dentro il messaggio (clic per aprirle)
 - **Rispondi** con citazione, invio con **Ctrl+Invio**, conferma di consegna e nuovi tentativi
-- **Modalità assenza** con risposta automatica (preimpostate o personalizzata)
-- **Invio di file e cartelle** via TCP (trascinandoli nella finestra o con *Allega*)
+- **Stato** Disponibile / Assente / Occupato con messaggio di risposta automatica personalizzato
+  (tasto destro sulla lista → *Stato…*, oppure dall'icona nella barra di sistema); gli altri
+  vedono "(assente)" o "(occupato)" accanto al nome
+- **Chat di gruppo**: seleziona gli utenti e premi *Chat*; ognuno vede i messaggi di tutti nella
+  stessa finestra. Con chi usa IP Messenger il messaggio arriva come messaggio normale col titolo
+  della chat
+- **Invio di file e cartelle** via TCP: trascinali in qualunque punto della finestra di invio
+  (lista, testo o pulsanti) oppure usa *Allega*
 - Icona nella barra di sistema, avvio automatico con Windows
 - **Registro dei messaggi** con ricerca (tutte le parole, maiuscole o minuscole indifferenti)
 - Indirizzi broadcast aggiuntivi per raggiungere altre sottoreti
@@ -67,6 +73,19 @@ Gli eseguibili si trovano negli *Artifacts* dell'ultima esecuzione di **Actions 
 - `POPMSG-linux.tar.gz` → `POPMSG`
 
 Al primo avvio Windows può chiedere di consentire l'accesso alla rete: consenti le reti private.
+
+Il numero di versione è nel titolo della finestra e in cima al menu del tasto destro.
+
+## Firma degli eseguibili
+
+La compilazione firma gli eseguibili quando nei *Secrets* del repository
+(*Settings → Secrets and variables → Actions*) ci sono i certificati:
+
+- **Windows**: `WINDOWS_CERT_PFX` (il certificato di firma del codice `.pfx` codificato in base64)
+  e `WINDOWS_CERT_PASSWORD`. Senza, l'eseguibile non è firmato.
+- **macOS**: `MACOS_CERT_P12` (certificato *Developer ID Application* in base64) e
+  `MACOS_CERT_PASSWORD`; per la notarizzazione anche `APPLE_ID`, `APPLE_TEAM_ID` e
+  `APPLE_APP_PASSWORD`. Senza, l'app ha una firma *ad hoc*.
 
 ## Dove salva i dati
 

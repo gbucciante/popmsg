@@ -23,6 +23,8 @@ jobs:
           - os: ubuntu-22.04
             artifact: POPMSG-linux
     runs-on: ${{ matrix.os }}
+    env:
+      WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,8 +38,31 @@ jobs:
         run: cargo test --release
       - name: Build
         run: cargo build --release
+      - name: Versione
+        shell: bash
+        run: echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+      # Firma Windows (Authenticode): attiva solo se nei Secrets del repository ci sono
+      # WINDOWS_CERT_PFX (certificato .pfx in base64) e WINDOWS_CERT_PASSWORD
+      - name: Firma Windows
+        if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX != ''
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Where-Object { $_.FullName -match 'x64' } | Select-Object -Last 1
+          & $signtool.FullName sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "POPMSG" /f "$env:RUNNER_TEMP\cert.pfx" /p "$env:WINDOWS_CERT_PASSWORD" target\release\popmsg.exe
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $signtool.FullName verify /pa target\release\popmsg.exe
+          Remove-Item "$env:RUNNER_TEMP\cert.pfx"
       - name: Impacchetta
         shell: bash
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           mkdir out
           if [ "$RUNNER_OS" = "Windows" ]; then
@@ -59,11 +84,34 @@ jobs:
             <key>CFBundleIdentifier</key><string>app.popmsg.POPMSG</string>
             <key>CFBundleIconFile</key><string>POPMSG</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>2.0.0</string>
+            <key>CFBundleShortVersionString</key><string>$VERSION</string>
+            <key>CFBundleVersion</key><string>$VERSION</string>
             <key>LSMinimumSystemVersion</key><string>11.0</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           PLIST
+            if [ -n "$MACOS_CERT_P12" ]; then
+              # firma Developer ID (+ notarizzazione se ci sono le credenziali Apple)
+              KC=$RUNNER_TEMP/firma.keychain-db
+              security create-keychain -p temp "$KC"
+              security set-keychain-settings -lut 3600 "$KC"
+              security unlock-keychain -p temp "$KC"
+              echo "$MACOS_CERT_P12" | base64 --decode > $RUNNER_TEMP/cert.p12
+              security import $RUNNER_TEMP/cert.p12 -k "$KC" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+              security set-key-partition-list -S apple-tool:,apple: -s -k temp "$KC" >/dev/null
+              security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+              ID=$(security find-identity -v -p codesigning "$KC" | grep -m1 'Developer ID Application' | sed 's/.*"\(.*\)"/\1/')
+              codesign --force --options runtime --timestamp -s "$ID" out/POPMSG.app
+              if [ -n "$APPLE_ID" ]; then
+                ditto -c -k --keepParent out/POPMSG.app notarize.zip
+                xcrun notarytool submit notarize.zip --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+                xcrun stapler staple out/POPMSG.app
+              fi
+            else
+              # firma ad hoc (gratuita): evita l'avviso "applicazione danneggiata"
+              codesign --force --deep -s - out/POPMSG.app
+            fi
+            codesign --verify --verbose out/POPMSG.app
             (cd out && ditto -c -k --keepParent POPMSG.app ../${{ matrix.artifact }}.zip)
           else
             cp target/release/popmsg out/POPMSG

@@ -11,6 +11,7 @@ pub enum TrayCmd {
     Present,
     Absence(usize),
     CustomAbsence,
+    Busy,
     Log,
     Settings,
     About,
@@ -81,12 +82,13 @@ mod imp {
             ids.push((it.id().clone(), cmd));
             it
         };
+        let title = MenuItem::new(format!("POPMSG {}", crate::net::APP_VERSION), false, None);
         let open = item("Invia messaggio…", TrayCmd::Open);
         let log = item("Registro messaggi", TrayCmd::Log);
         let settings = item("Impostazioni…", TrayCmd::Settings);
         let about = item("Informazioni su POPMSG", TrayCmd::About);
         let quit = item("Esci", TrayCmd::Quit);
-        let sub = Submenu::new("Modalità assenza", true);
+        let sub = Submenu::new("Stato", true);
         let mut absence = Vec::new();
         let present = CheckMenuItem::new("Presente", true, true, None);
         ids.push((present.id().clone(), TrayCmd::Present));
@@ -103,7 +105,14 @@ mod imp {
         ids.push((custom.id().clone(), TrayCmd::CustomAbsence));
         sub.append(&custom).ok();
         absence.push(custom);
+        sub.append(&PredefinedMenuItem::separator()).ok();
+        let busy = CheckMenuItem::new("Occupato…", true, false, None);
+        ids.push((busy.id().clone(), TrayCmd::Busy));
+        sub.append(&busy).ok();
+        absence.push(busy);
         menu.append_items(&[
+            &title,
+            &PredefinedMenuItem::separator(),
             &open,
             &PredefinedMenuItem::separator(),
             &sub,
@@ -210,19 +219,23 @@ mod imp {
                 opts.push(RadioItem { label: (*l).into(), ..Default::default() });
             }
             opts.push(RadioItem { label: "Personalizzata…".into(), ..Default::default() });
+            opts.push(RadioItem { label: "Occupato…".into(), ..Default::default() });
             let n = ABSENCE_PRESETS.len();
             vec![
+                StandardItem { label: format!("POPMSG {}", crate::net::APP_VERSION), enabled: false, ..Default::default() }.into(),
+                MenuItem::Separator,
                 item("Invia messaggio…", TrayCmd::Open),
                 MenuItem::Separator,
                 SubMenu {
-                    label: "Modalità assenza".into(),
+                    label: "Stato".into(),
                     submenu: vec![RadioGroup {
                         selected: self.sel,
                         select: Box::new(move |t: &mut Self, i| {
                             let c = match i {
                                 0 => TrayCmd::Present,
                                 i if i <= n => TrayCmd::Absence(i - 1),
-                                _ => TrayCmd::CustomAbsence,
+                                i if i == n + 1 => TrayCmd::CustomAbsence,
+                                _ => TrayCmd::Busy,
                             };
                             t.tx.send(Msg::Tray(c));
                         }),

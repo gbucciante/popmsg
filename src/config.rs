@@ -14,6 +14,8 @@ pub const ABSENCE_PRESETS: &[(&str, &str)] = &[
     ("Fuori ufficio", "Sono fuori ufficio."),
 ];
 
+pub const BUSY_TEXT: &str = "Sono occupato, ti rispondo appena posso.";
+
 pub fn config_dir() -> PathBuf {
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
@@ -65,6 +67,8 @@ pub struct Config {
     pub share_list: bool,
     /// usa il formato v5 di IP Messenger (IPDict) con chi lo supporta
     pub ipdict: bool,
+    /// risposta automatica quando lo stato è "Occupato"
+    pub busy_text: String,
 }
 
 impl Config {
@@ -103,6 +107,7 @@ impl Config {
             password_all: b("password_all", false),
             share_list: b("share_list", true),
             ipdict: b("ipdict", false),
+            busy_text: s("busy_text", BUSY_TEXT),
         }
     }
 
@@ -127,6 +132,7 @@ impl Config {
             ("password_all", bl(self.password_all).into()),
             ("share_list", bl(self.share_list).into()),
             ("ipdict", bl(self.ipdict).into()),
+            ("busy_text", self.busy_text.clone()),
         ];
         let text: String = lines.iter().map(|(k, v)| format!("{k}={}\n", escape(v))).collect();
         let _ = fs::write(Self::path(), text);

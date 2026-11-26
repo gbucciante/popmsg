@@ -30,6 +30,8 @@ pub const ANSPUBKEY: u32 = 0x73;
 /// estensione POPMSG (ignorata da IP Messenger): scambio dell'elenco utenti
 pub const POPMSG_GETLIST: u32 = 0xF0;
 pub const POPMSG_ANSLIST: u32 = 0xF1;
+/// messaggio di una chat di gruppo tra POPMSG
+pub const POPMSG_CHAT: u32 = 0xF2;
 
 // ---- opzioni generali ----
 pub const ABSENCEOPT: u32 = 0x0000_0100;

@@ -45,6 +45,20 @@ impl User {
     pub fn absent(&self) -> bool {
         self.command & p::ABSENCEOPT != 0
     }
+    /// "occupato" o "assente" (None se disponibile)
+    pub fn status(&self) -> Option<&'static str> {
+        if !self.absent() {
+            None
+        } else if self.nick.ends_with(" [Occupato]") {
+            Some("occupato")
+        } else {
+            Some("assente")
+        }
+    }
+    /// nome senza l'indicazione di stato aggiunta al nick
+    pub fn base_nick(&self) -> &str {
+        self.nick.trim_end_matches(" [Assente]").trim_end_matches(" [Occupato]")
+    }
     pub fn name(&self) -> &str {
         if self.nick.is_empty() { &self.login } else { &self.nick }
     }
@@ -124,6 +138,10 @@ struct State {
     extra: Vec<String>,
     absent: bool,
     absence_text: String,
+    /// "Assente" oppure "Occupato": compare accanto al nome
+    away_label: String,
+    /// indirizzi degli altri POPMSG (estensioni come la chat di gruppo)
+    popmsg: HashSet<Addr>,
     users: BTreeMap<Addr, User>,
     pending: HashMap<u64, Pending>,
     recent: HashMap<(Addr, u64), Instant>,
@@ -235,6 +253,8 @@ impl Engine {
             extra: opts.extra,
             absent: false,
             absence_text: "Sono assente in questo momento.".into(),
+            away_label: "Assente".into(),
+            popmsg: HashSet::new(),
             users: BTreeMap::new(),
             pending: HashMap::new(),
             recent: HashMap::new(),
@@ -294,6 +314,14 @@ impl Engine {
     pub fn absent(&self) -> bool {
         self.lock().absent
     }
+    pub fn is_popmsg(&self, a: &Addr) -> bool {
+        self.lock().popmsg.contains(a)
+    }
+    /// true se l'indirizzo è questo stesso programma
+    pub fn is_me(&self, a: &Addr) -> bool {
+        let s = self.lock();
+        a.port() == s.port && (s.local_ips.contains(a.ip()) || a.ip().is_loopback())
+    }
     pub fn fingerprint(&self) -> Option<String> {
         self.lock().key.as_ref().map(|k| crypto::fingerprint(&k.to_public_key()))
     }
@@ -315,7 +343,7 @@ impl Engine {
         if s.absent {
             opt |= p::ABSENCEOPT;
         }
-        let nick = if s.absent { format!("{} [Assente]", s.nick) } else { s.nick.clone() };
+        let nick = if s.absent { format!("{} [{}]", s.nick, s.away_label) } else { s.nick.clone() };
         let (n, t) = p::entry_extra(&nick, &s.group, &s.login, &s.host);
         (opt, n, t)
     }
@@ -394,9 +422,15 @@ impl Engine {
     }
 
     pub fn set_absence(&self, on: bool, text: Option<&str>) {
+        self.set_status(on, "Assente", text)
+    }
+
+    /// Stato: `on` = assente/occupato, `label` = "Assente" o "Occupato".
+    pub fn set_status(&self, on: bool, label: &str, text: Option<&str>) {
         {
             let mut s = self.lock();
             s.absent = on;
+            s.away_label = label.to_string();
             if let Some(t) = text {
                 s.absence_text = t.to_string();
             }
@@ -456,52 +490,68 @@ impl Engine {
             };
             files.push(Arc::new(Shared { path: path.clone(), info }));
         }
+        let mut cmd = p::SENDMSG | p::SENDCHECKOPT;
+        if users.len() > 1 {
+            cmd |= p::MULTICASTOPT;
+        }
+        if sealed > 0 {
+            cmd |= p::SECRETEXOPT;
+        }
+        if sealed == 2 {
+            cmd |= p::PASSWORDOPT;
+        }
+        if !files.is_empty() {
+            cmd |= p::FILEATTACHOPT;
+        }
+        users.iter().map(|u| self.send_one(u, cmd, text, &files)).collect()
+    }
+
+    /// Messaggio di una chat di gruppo: agli altri POPMSG con l'intestazione della chat
+    /// (`header`, una riga), a IP Messenger come messaggio normale con il titolo davanti.
+    pub fn send_chat(&self, users: &[User], header: &str, title: &str, text: &str) -> Vec<u64> {
+        users
+            .iter()
+            .map(|u| {
+                if self.is_popmsg(&u.addr) {
+                    self.send_one(u, p::POPMSG_CHAT | p::SENDCHECKOPT, &format!("{header}\n{text}"), &[])
+                } else {
+                    let t = format!("[Chat «{title}»]\n{text}");
+                    self.send_one(u, p::SENDMSG | p::SENDCHECKOPT | p::MULTICASTOPT, &t, &[])
+                }
+            })
+            .collect()
+    }
+
+    fn send_one(&self, u: &User, cmd: u32, text: &str, files: &[Arc<Shared>]) -> u64 {
         let file_list = if files.is_empty() {
             String::new()
         } else {
             p::build_file_list(&files.iter().map(|f| f.info.clone()).collect::<Vec<_>>())
         };
-        let mut out = Vec::new();
-        for u in users {
-            let mut cmd = p::SENDMSG | p::SENDCHECKOPT;
-            if users.len() > 1 {
-                cmd |= p::MULTICASTOPT;
-            }
-            if sealed > 0 {
-                cmd |= p::SECRETEXOPT;
-            }
-            if sealed == 2 {
-                cmd |= p::PASSWORDOPT;
-            }
+        let no = p::next_packet_no();
+        let need_key = {
+            let mut s = self.lock();
             if !files.is_empty() {
-                cmd |= p::FILEATTACHOPT;
+                s.shared.insert(no, files.iter().map(|f| (f.info.id, f.clone())).collect());
             }
-            let no = p::next_packet_no();
-            let need_key = {
-                let mut s = self.lock();
-                if !files.is_empty() {
-                    s.shared.insert(no, files.iter().map(|f| (f.info.id, f.clone())).collect());
-                }
-                let need = s.encryption && u.encrypts() && !s.peer_keys.contains_key(&u.addr);
-                if need {
-                    s.key_wait.entry(u.addr).or_default().push(Queued {
-                        no,
-                        cmd,
-                        text: text.to_string(),
-                        file_list: file_list.clone(),
-                        since: Instant::now(),
-                    });
-                }
-                need
-            };
-            if need_key {
-                self.reply(u.addr, p::GETPUBKEY, &format!("{:X}", crypto::OUR_CAPS));
-            } else {
-                self.dispatch(u.addr, no, cmd, text, &file_list, true);
+            let need = s.encryption && u.encrypts() && !s.peer_keys.contains_key(&u.addr);
+            if need {
+                s.key_wait.entry(u.addr).or_default().push(Queued {
+                    no,
+                    cmd,
+                    text: text.to_string(),
+                    file_list: file_list.clone(),
+                    since: Instant::now(),
+                });
             }
-            out.push(no);
+            need
+        };
+        if need_key {
+            self.reply(u.addr, p::GETPUBKEY, &format!("{:X}", crypto::OUR_CAPS));
+        } else {
+            self.dispatch(u.addr, no, cmd, text, &file_list, true);
         }
-        out
+        no
     }
 
     fn dispatch(&self, a: Addr, no: u64, mut cmd: u32, text: &str, file_list: &str, allow_enc: bool) {
@@ -565,7 +615,7 @@ impl Engine {
         d.put_int("FLG", (cmd & !0xff & !(p::ENCRYPTOPT | p::ENCEXTMSGOPT | p::UTF8OPT)) as i64);
         d.put_str("CVER", &format!("POPMSG {APP_VERSION}"));
         d.put_str("GRP", &s.group);
-        let nick = if s.absent { format!("{} [Assente]", s.nick) } else { s.nick.clone() };
+        let nick = if s.absent { format!("{} [{}]", s.nick, s.away_label) } else { s.nick.clone() };
         d.put_str("NCK", &nick);
         d.put_int("STAT", opt as i64);
         if !file_list.is_empty() {
@@ -733,7 +783,7 @@ impl Engine {
             message: body,
             tail,
         };
-        if pk.mode() == p::SENDMSG {
+        if matches!(pk.mode(), p::SENDMSG | p::POPMSG_CHAT) {
             self.on_message_ex(pk, a, Some((o.encrypted, o.signed)));
         } else {
             self.handle(pk, a);
@@ -746,6 +796,11 @@ impl Engine {
             let mut s = self.lock();
             if matches!(pk.mode(), p::BR_ENTRY | p::ANSENTRY) {
                 s.peer_keys.remove(&a);
+                if p::is_popmsg(pk) {
+                    s.popmsg.insert(a);
+                } else {
+                    s.popmsg.remove(&a);
+                }
             }
             s.users.insert(
                 a,
@@ -808,7 +863,7 @@ impl Engine {
                     self.emit(Event::UsersChanged);
                 }
             }
-            p::SENDMSG => self.on_message(pk, a),
+            p::SENDMSG | p::POPMSG_CHAT => self.on_message(pk, a),
             p::RECVMSG => {
                 let no = num();
                 if self.lock().pending.remove(&no).is_some() {
@@ -937,7 +992,7 @@ impl Engine {
         // caratteri di controllo (tranne a capo e tabulazione) non sono testo
         text.retain(|c| c == '\n' || c == '\t' || !c.is_control());
         let files = if pk.has(p::FILEATTACHOPT) { p::parse_file_list(&file_text) } else { vec![] };
-        if absent && !pk.has(p::AUTORETOPT | p::BROADCASTOPT) {
+        if absent && !pk.has(p::AUTORETOPT | p::BROADCASTOPT) && pk.mode() == p::SENDMSG {
             self.reply(a, p::SENDMSG | p::AUTORETOPT, &absence_text);
         }
         self.emit(Event::Message(Box::new(Message {
