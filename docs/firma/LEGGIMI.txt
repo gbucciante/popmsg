@@ -1,0 +1,30 @@
+FIRMA DI POPMSG.EXE
+===================
+
+POPMSG.exe e' firmato con un certificato creato apposta per l'ufficio
+(autofirmato). Finche' un PC non lo conosce, Windows mostra la firma come
+"non attendibile". Per renderlo attendibile basta farlo una volta per PC.
+
+A MANO, SU OGNI PC
+1. Copia questa cartella sul PC.
+2. Tasto destro su installa-certificato.cmd -> "Esegui come amministratore".
+3. Conferma. Il certificato va in "Autorita' di certificazione radice
+   attendibili" e in "Autori attendibili".
+
+CON UN CRITERIO DI GRUPPO (dominio Active Directory)
+1. Apri "Gestione Criteri di gruppo", crea o modifica un GPO collegato ai PC.
+2. Configurazione computer -> Criteri -> Impostazioni di Windows ->
+   Impostazioni sicurezza -> Criteri chiave pubblica.
+3. Tasto destro su "Autorita' di certificazione radice attendibili" ->
+   Importa -> scegli POPMSG-firma.cer.
+4. Ripeti su "Autori attendibili" con lo stesso file.
+5. I PC lo ricevono al prossimo riavvio o con "gpupdate /force".
+
+CONTROLLO
+Tasto destro su POPMSG.exe -> Proprieta' -> Firme digitali -> Dettagli:
+deve comparire "La firma digitale e' valida" e il firmatario POPMSG.
+
+NOTA
+Un certificato autofirmato non toglie l'avviso SmartScreen per i file
+scaricati da Internet: se compare, "Ulteriori informazioni" -> "Esegui
+comunque", oppure Proprieta' del file -> "Annulla blocco".

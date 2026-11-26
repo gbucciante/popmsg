@@ -82,7 +82,11 @@ La compilazione firma gli eseguibili quando nei *Secrets* del repository
 (*Settings → Secrets and variables → Actions*) ci sono i certificati:
 
 - **Windows**: `WINDOWS_CERT_PFX` (il certificato di firma del codice `.pfx` codificato in base64)
-  e `WINDOWS_CERT_PASSWORD`. Senza, l'eseguibile non è firmato.
+  e `WINDOWS_CERT_PASSWORD`. Senza, l'eseguibile non è firmato. Per un certificato
+  autofirmato (uso in ufficio) c'è `docs/firma/crea-certificato.ps1`: crea il certificato e il
+  testo da incollare nel Secret. Lo zip per Windows contiene allora anche la cartella
+  `certificato` con il certificato pubblico, `installa-certificato.cmd` (da avviare come
+  amministratore su ogni PC) e le istruzioni per distribuirlo con un criterio di gruppo.
 - **macOS**: `MACOS_CERT_P12` (certificato *Developer ID Application* in base64) e
   `MACOS_CERT_PASSWORD`; per la notarizzazione anche `APPLE_ID`, `APPLE_TEAM_ID` e
   `APPLE_APP_PASSWORD`. Senza, l'app ha una firma *ad hoc*.

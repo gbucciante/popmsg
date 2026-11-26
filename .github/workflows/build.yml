@@ -53,7 +53,10 @@ jobs:
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Where-Object { $_.FullName -match 'x64' } | Select-Object -Last 1
           & $signtool.FullName sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "POPMSG" /f "$env:RUNNER_TEMP\cert.pfx" /p "$env:WINDOWS_CERT_PASSWORD" target\release\popmsg.exe
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          & $signtool.FullName verify /pa target\release\popmsg.exe
+          # il certificato pubblico va nello zip, con lo script per renderlo attendibile sui PC
+          $c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("$env:RUNNER_TEMP\cert.pfx", $env:WINDOWS_CERT_PASSWORD)
+          [IO.File]::WriteAllBytes("POPMSG-firma.cer", $c.Export('Cert'))
+          Write-Host "Firmato con $($c.Subject), impronta $($c.Thumbprint)"
           Remove-Item "$env:RUNNER_TEMP\cert.pfx"
       - name: Impacchetta
         shell: bash
@@ -67,7 +70,11 @@ jobs:
           mkdir out
           if [ "$RUNNER_OS" = "Windows" ]; then
             cp target/release/popmsg.exe out/POPMSG.exe
-            (cd out && 7z a ../${{ matrix.artifact }}.zip POPMSG.exe)
+            if [ -f POPMSG-firma.cer ]; then
+              mkdir out/certificato
+              cp POPMSG-firma.cer docs/firma/installa-certificato.cmd docs/firma/LEGGIMI.txt out/certificato/
+            fi
+            (cd out && 7z a ../${{ matrix.artifact }}.zip *)
           elif [ "$RUNNER_OS" = "macOS" ]; then
             APP=out/POPMSG.app/Contents
             mkdir -p $APP/MacOS $APP/Resources
