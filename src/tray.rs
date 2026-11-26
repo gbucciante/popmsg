@@ -12,6 +12,7 @@ pub enum TrayCmd {
     Absence(usize),
     CustomAbsence,
     Busy,
+    Update,
     Log,
     Settings,
     About,
@@ -85,6 +86,7 @@ mod imp {
         let title = MenuItem::new(format!("POPMSG {}", crate::net::APP_VERSION), false, None);
         let open = item("Invia messaggio…", TrayCmd::Open);
         let log = item("Registro messaggi", TrayCmd::Log);
+        let upd = item("Cerca aggiornamenti…", TrayCmd::Update);
         let settings = item("Impostazioni…", TrayCmd::Settings);
         let about = item("Informazioni su POPMSG", TrayCmd::About);
         let quit = item("Esci", TrayCmd::Quit);
@@ -117,6 +119,7 @@ mod imp {
             &PredefinedMenuItem::separator(),
             &sub,
             &log,
+            &upd,
             &settings,
             &about,
             &PredefinedMenuItem::separator(),
@@ -246,6 +249,7 @@ mod imp {
                 }
                 .into(),
                 item("Registro messaggi", TrayCmd::Log),
+                item("Cerca aggiornamenti…", TrayCmd::Update),
                 item("Impostazioni…", TrayCmd::Settings),
                 item("Informazioni su POPMSG", TrayCmd::About),
                 MenuItem::Separator,

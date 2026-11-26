@@ -528,7 +528,7 @@ impl SendWin {
             let (s, c) = (Rc::downgrade(&sw), ctl.clone());
             sw.list.set_menu(move || {
                 let Some(s) = s.upgrade() else { return };
-                let menu = fltk::menu::MenuItem::new(&["POPMSG ", "Chat di gruppo con i selezionati…", "Stato (disponibile, assente, occupato)…", "Modifica Tel…", "Aggiungi utente…", "Importa elenco utenti…", "Esporta elenco utenti…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Informazioni su POPMSG"]);
+                let menu = fltk::menu::MenuItem::new(&["POPMSG ", "Chat di gruppo con i selezionati…", "Stato (disponibile, assente, occupato)…", "Modifica Tel…", "Aggiungi utente…", "Importa elenco utenti…", "Esporta elenco utenti…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Cerca aggiornamenti…", "Informazioni su POPMSG"]);
                 if let Some(mut v) = menu.at(0) {
                     v.set_label(&format!("POPMSG {}", crate::net::APP_VERSION));
                     v.deactivate();
@@ -599,6 +599,7 @@ impl SendWin {
                         }
                         "Impostazioni…" => c.tray_cmd(TrayCmd::Settings),
                         "Registro messaggi" => c.tray_cmd(TrayCmd::Log),
+                        "Cerca aggiornamenti…" => c.check_updates(true),
                         "Informazioni su POPMSG" => c.tray_cmd(TrayCmd::About),
                         "Messaggio di assenza…" => sel.iter().for_each(|u| c.engine.request_absence(u)),
                         "Togli dalla lista (se non in linea)" => {
@@ -1142,7 +1143,7 @@ fn open_path(p: &Path) {
 // ============================================================ impostazioni
 fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     let cfg = ctl.cfg.borrow().clone();
-    let mut win = Window::default().with_size(500, 650).with_label("Impostazioni di POPMSG").center_screen();
+    let mut win = Window::default().with_size(500, 710).with_label("Impostazioni di POPMSG").center_screen();
     let mut col = Flex::default_fill().column();
     col.set_margin(10);
     col.set_pad(6);
@@ -1161,6 +1162,9 @@ fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     let dl = row("Cartella per i file:", &cfg.download_dir, &mut col);
     let extra = row("Indirizzi aggiuntivi:", &cfg.extra.join(", "), &mut col);
     let port = row("Porta (riavvio):", &cfg.port.to_string(), &mut col);
+    let upd_dir = row("Aggiornamenti da:", &cfg.update_dir, &mut col);
+    let mut ud = upd_dir.clone();
+    ud.set_tooltip("Vuoto = nuove versioni da GitHub (Internet).\nOppure una cartella di rete con POPMSG.exe, es. \\\\server\\popmsg");
     let check = |label: &str, v: bool, col: &mut Flex| -> CheckButton {
         let mut c = CheckButton::default().with_label(label);
         c.set_value(v);
@@ -1176,6 +1180,7 @@ fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     let offline = check("Mostra in grigio chi non è in linea e tieni i messaggi in attesa", cfg.offline, &mut col);
     let share = check("Scambia automaticamente l'elenco utenti con gli altri POPMSG", cfg.share_list, &mut col);
     let log = check("Registra i messaggi su file", cfg.log_enabled, &mut col);
+    let upd_auto = check("Controlla da solo se ci sono aggiornamenti", cfg.update_auto, &mut col);
     let auto = check("Avvia POPMSG all'accesso a Windows", config::autostart_enabled(), &mut col);
     // password per aprire i messaggi sigillati
     let mut pr = Flex::default().row();
@@ -1259,6 +1264,8 @@ fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     c.log_enabled = log.value();
     c.share_list = share.value();
     c.ipdict = v5.value();
+    c.update_auto = upd_auto.value();
+    c.update_dir = upd_dir.value().trim().to_string();
     c.password_all = pw_all.value();
     if let Some(pw) = new_pw.borrow().as_ref() {
         c.password = if pw.is_empty() { String::new() } else { config::password_hash(pw) };
@@ -1385,6 +1392,9 @@ pub struct Ctl {
     downloaded: Arc<std::sync::Mutex<HashMap<u64, usize>>>,
     inflight: RefCell<HashMap<u64, u64>>,
     chats: RefCell<HashMap<String, Rc<ChatWin>>>,
+    updating: std::cell::Cell<bool>,
+    offered: RefCell<Option<String>>,
+    progress: RefCell<Option<Window>>,
 }
 
 impl Ctl {
@@ -1400,6 +1410,9 @@ impl Ctl {
             downloaded: Arc::new(std::sync::Mutex::new(HashMap::new())),
             inflight: RefCell::new(HashMap::new()),
             chats: RefCell::new(HashMap::new()),
+            updating: std::cell::Cell::new(false),
+            offered: RefCell::new(None),
+            progress: RefCell::new(None),
         })
     }
 
@@ -1638,6 +1651,7 @@ impl Ctl {
                     _ => self.update_tray(),
                 }
             }
+            TrayCmd::Update => self.check_updates(true),
             TrayCmd::Log => log_viewer(&self.cfg.borrow().log_path.clone()),
             TrayCmd::Settings => {
                 let old = self.cfg.borrow().clone();
@@ -2037,6 +2051,93 @@ impl Ctl {
         }
         if cfg.sound {
             dialog::beep(dialog::BeepType::Message);
+        }
+    }
+}
+
+// ============================================================ aggiornamenti
+impl Ctl {
+    /// Controllo in un thread separato; l'esito arriva come `Msg::Update`.
+    pub fn check_updates(&self, manual: bool) {
+        if self.updating.get() {
+            return;
+        }
+        self.updating.set(true);
+        let dir = self.cfg.borrow().update_dir.clone();
+        std::thread::spawn(move || {
+            let r = crate::update::check(crate::net::APP_VERSION, &dir);
+            if let Some(tx) = crate::TX.get() {
+                tx.send(crate::Msg::Update(r, manual));
+            }
+        });
+    }
+
+    pub fn on_update(&self, r: Result<Option<crate::update::Available>, String>, manual: bool) {
+        self.updating.set(false);
+        let a = match r {
+            Err(e) => {
+                if manual {
+                    notice("Aggiornamenti", &e);
+                }
+                return;
+            }
+            Ok(None) => {
+                if manual {
+                    notice("Aggiornamenti", &format!("POPMSG {} è l'ultima versione.", crate::net::APP_VERSION));
+                }
+                return;
+            }
+            Ok(Some(a)) => a,
+        };
+        // controllo automatico: la stessa versione si propone una volta sola per sessione
+        if !manual && self.offered.borrow().as_deref() == Some(a.version.as_str()) {
+            return;
+        }
+        *self.offered.borrow_mut() = Some(a.version.clone());
+        if a.source.is_empty() {
+            // macOS: si aggiorna scaricando la nuova app
+            if dialog::choice2_default(&format!("È disponibile POPMSG {} (hai la {}).", a.version, crate::net::APP_VERSION), "Più tardi", "Apri la pagina", "") == Some(1) {
+                open_path(Path::new(&a.page));
+            }
+            return;
+        }
+        let q = format!("È disponibile POPMSG {} (hai la {}).\nAggiornare adesso? POPMSG si riavvierà.", a.version, crate::net::APP_VERSION);
+        if dialog::choice2_default(&q, "Più tardi", "Aggiorna", "") != Some(1) {
+            return;
+        }
+        let mut w = Window::default().with_size(320, 80).with_label("Aggiornamento").center_screen();
+        Frame::default_fill().with_label(&format!("Scarico POPMSG {}…", a.version));
+        w.end();
+        w.set_icon(icon());
+        w.show();
+        *self.progress.borrow_mut() = Some(w);
+        self.updating.set(true);
+        std::thread::spawn(move || {
+            let r = crate::update::apply(&a);
+            if let Some(tx) = crate::TX.get() {
+                tx.send(crate::Msg::UpdateDone(r.map_err(|e| e.to_string())));
+            }
+        });
+    }
+
+    pub fn on_update_done(&self, r: Result<PathBuf, String>) {
+        self.updating.set(false);
+        if let Some(mut w) = self.progress.borrow_mut().take() {
+            w.hide();
+            app::delete_widget(w);
+        }
+        match r {
+            Ok(exe) => {
+                self.cfg.borrow().save();
+                self.engine.stop();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                // percorso vuoto: l'installatore sostituisce e riavvia POPMSG
+                if !exe.as_os_str().is_empty() {
+                    let _ = std::process::Command::new(exe).arg("--show").spawn();
+                }
+                std::process::exit(0);
+            }
+            Err(e) => notice("Aggiornamento non riuscito", &e),
         }
     }
 }

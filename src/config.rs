@@ -69,6 +69,10 @@ pub struct Config {
     pub ipdict: bool,
     /// risposta automatica quando lo stato è "Occupato"
     pub busy_text: String,
+    /// controlla da solo se ci sono nuove versioni
+    pub update_auto: bool,
+    /// cartella di rete con POPMSG.exe aggiornato ("" = release su GitHub)
+    pub update_dir: String,
 }
 
 impl Config {
@@ -108,6 +112,8 @@ impl Config {
             share_list: b("share_list", true),
             ipdict: b("ipdict", false),
             busy_text: s("busy_text", BUSY_TEXT),
+            update_auto: b("update_auto", true),
+            update_dir: s("update_dir", ""),
         }
     }
 
@@ -133,6 +139,8 @@ impl Config {
             ("share_list", bl(self.share_list).into()),
             ("ipdict", bl(self.ipdict).into()),
             ("busy_text", self.busy_text.clone()),
+            ("update_auto", bl(self.update_auto).into()),
+            ("update_dir", self.update_dir.clone()),
         ];
         let text: String = lines.iter().map(|(k, v)| format!("{k}={}\n", escape(v))).collect();
         let _ = fs::write(Self::path(), text);
@@ -253,8 +261,14 @@ pub fn write_log(path: &str, dir: &str, who: &str, text: &str, flags: &[&str], f
 
 #[cfg(windows)]
 pub fn autostart_enabled() -> bool {
+    autostart_in("HKCU") || autostart_in("HKLM")
+}
+
+/// L'installatore registra l'avvio automatico per tutti gli utenti in HKLM.
+#[cfg(windows)]
+fn autostart_in(root: &str) -> bool {
     std::process::Command::new("reg")
-        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "POPMSG"])
+        .args(["query", &format!(r"{root}\Software\Microsoft\Windows\CurrentVersion\Run"), "/v", "POPMSG"])
         .creation_flags(0x0800_0000)
         .output()
         .map(|o| o.status.success())
@@ -263,6 +277,10 @@ pub fn autostart_enabled() -> bool {
 
 #[cfg(windows)]
 pub fn set_autostart(on: bool) {
+    // già avviato per tutti dall'installatore: non serve (e non si toglie senza amministratore)
+    if on && autostart_in("HKLM") {
+        return;
+    }
     let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let mut c = std::process::Command::new("reg");

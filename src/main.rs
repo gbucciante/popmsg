@@ -13,6 +13,7 @@ mod protocol;
 mod rich;
 mod tray;
 mod ui;
+mod update;
 mod usertable;
 
 use fltk::{app, dialog, enums::Font};
@@ -22,9 +23,22 @@ pub enum Msg {
     Net(net::Event),
     Tray(tray::TrayCmd),
     TrayClick,
+    /// esito del controllo aggiornamenti (true = chiesto dall'utente)
+    Update(Result<Option<update::Available>, String>, bool),
+    /// nuova versione installata (percorso da avviare) o errore
+    UpdateDone(Result<std::path::PathBuf, String>),
 }
 
+/// Canale verso il ciclo principale, usabile dai thread di lavoro.
+pub static TX: std::sync::OnceLock<app::Sender<Msg>> = std::sync::OnceLock::new();
+
 fn main() {
+    if std::env::args().any(|a| a == "--version") {
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "POPMSG {}", net::APP_VERSION);
+        return;
+    }
+    update::cleanup();
     let app = app::App::default().with_scheme(app::Scheme::Base);
     if cfg!(windows) {
         Font::set_font(Font::Helvetica, "Segoe UI");
@@ -33,6 +47,7 @@ fn main() {
     app::set_font_size(13);
     app::set_visible_focus(false);
     let (tx, rx) = app::channel::<Msg>();
+    let _ = TX.set(tx);
 
     let cfg = config::Config::load();
     let key = config::load_or_create_key();
@@ -84,6 +99,16 @@ fn main() {
             app::repeat_timeout3(0.2, h);
         });
     }
+    // aggiornamenti: primo controllo dopo un minuto, poi ogni 6 ore
+    {
+        let c = ctl.clone();
+        app::add_timeout3(60.0, move |h| {
+            if c.cfg.borrow().update_auto {
+                c.check_updates(false);
+            }
+            app::repeat_timeout3(6.0 * 3600.0, h);
+        });
+    }
     let mut started = false;
     let _ = &app;
     loop {
@@ -92,6 +117,8 @@ fn main() {
             match m {
                 Msg::Net(ev) => ui::handle_net(&ctl, ev),
                 Msg::Tray(c) => ctl.tray_cmd(c),
+                Msg::Update(r, manual) => ctl.on_update(r, manual),
+                Msg::UpdateDone(r) => ctl.on_update_done(r),
                 Msg::TrayClick => {
                     if !ctl.show_unread() && !cfg!(windows) {
                         ctl.open_send(&[], "");

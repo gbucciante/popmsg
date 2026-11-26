@@ -74,6 +74,28 @@ Gli eseguibili si trovano negli *Artifacts* dell'ultima esecuzione di **Actions 
 
 Al primo avvio Windows può chiedere di consentire l'accesso alla rete: consenti le reti private.
 
+### Installatore per Windows
+
+`POPMSG-setup.exe` (artifact `POPMSG-windows-setup`, o nelle *Releases*) fa tutto in un passo:
+installa POPMSG in *Programmi*, rende attendibile il certificato della firma (se la compilazione
+è firmata), crea il collegamento nel menu Start, l'avvio automatico all'accesso e la regola del
+firewall, e si disinstalla da *App installate*. Per installarlo su molti PC senza domande:
+`POPMSG-setup.exe /VERYSILENT /SUPPRESSMSGBOXES`.
+
+### Aggiornamenti
+
+POPMSG controlla da solo (un minuto dopo l'avvio e poi ogni 6 ore) se c'è una versione più nuova
+e propone di installarla; si può anche usare *Cerca aggiornamenti…* dal tasto destro o
+dall'icona. Le nuove versioni arrivano:
+
+- dalle *Releases* di GitHub (serve Internet): la release si crea su GitHub con un tag `vX.Y.Z`
+  uguale alla versione in `Cargo.toml`, e la compilazione ci allega i file;
+- oppure da una **cartella di rete** indicata in *Impostazioni → Aggiornamenti da*
+  (es. `\\server\popmsg`) in cui si copiano `POPMSG.exe` e `POPMSG-setup.exe` della nuova versione.
+
+Se POPMSG è firmato, accetta solo aggiornamenti firmati con lo stesso certificato. Installato in
+*Programmi*, l'aggiornamento passa dall'installatore e chiede la conferma di amministratore.
+
 Il numero di versione è nel titolo della finestra e in cima al menu del tasto destro.
 
 ## Firma degli eseguibili
