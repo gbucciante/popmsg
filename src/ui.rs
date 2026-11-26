@@ -281,12 +281,6 @@ impl SendWin {
         emo.set_tooltip("Emoticon");
         let mut seal = CheckButton::default().with_label("Sigilla");
         seal.set_value(ctl.cfg.borrow().seal);
-        Frame::default();
-        let mut send = ReturnButton::default().with_label("Invia");
-        send.set_label_font(Font::HelveticaBold);
-        bottom.fixed(&attach, 80);
-        bottom.fixed(&groups, 80);
-        bottom.fixed(&emo, 40);
         let mut lock = CheckButton::default().with_label("Lucchetto");
         lock.set_tooltip("Il destinatario deve inserire la sua password di POPMSG / IP Messenger per aprirlo");
         if !seal.value() {
@@ -296,6 +290,12 @@ impl SendWin {
             let mut l = lock.clone();
             seal.set_callback(move |s| if s.value() { l.activate() } else { l.set_value(false); l.deactivate() });
         }
+        Frame::default();
+        let mut send = ReturnButton::default().with_label("Invia");
+        send.set_label_font(Font::HelveticaBold);
+        bottom.fixed(&attach, 80);
+        bottom.fixed(&groups, 80);
+        bottom.fixed(&emo, 40);
         bottom.fixed(&seal, 75);
         bottom.fixed(&lock, 95);
         bottom.fixed(&send, 120);
@@ -448,13 +448,38 @@ impl SendWin {
         }
         {
             let f = do_send.clone();
-            ed.handle(move |_, ev| {
-                if ev == Event::KeyDown
-                    && matches!(app::event_key(), Key::Enter | Key::KPEnter)
-                    && app::event_state().contains(Shortcut::Ctrl)
-                {
+            let s = Rc::downgrade(&sw);
+            let col = col.clone();
+            // il nostro gestore prima di quello dell'editor (Ctrl+Invio, immagini incollate)
+            ed.super_handle_first(false);
+            ed.handle(move |ed, ev| {
+                let ctrl = app::event_state().contains(Shortcut::Ctrl) || app::event_state().contains(Shortcut::Command);
+                if ev == Event::KeyDown && matches!(app::event_key(), Key::Enter | Key::KPEnter) && ctrl {
                     f();
                     return true;
+                }
+                // Ctrl+V con un'immagine negli appunti: diventa un'immagine del messaggio
+                if ev == Event::KeyDown
+                    && ctrl
+                    && app::event_key() == Key::from_char('v')
+                    && app::clipboard_contains(app::ClipboardContent::Image)
+                    && !app::clipboard_contains(app::ClipboardContent::Text)
+                {
+                    app::paste_image(ed);
+                    return true;
+                }
+                if ev == Event::Paste {
+                    if let Some(app::ClipboardEvent::Image(Some(img))) = app::event_clipboard() {
+                        let Some(s) = s.upgrade() else { return true };
+                        // posizione nel testo in caratteri UTF-16, come IP Messenger
+                        let before = ed.buffer().map(|b| b.text_range(0, ed.insert_position()).unwrap_or_default()).unwrap_or_default();
+                        let pos = before.encode_utf16().count() as u32;
+                        match save_clip_png(&img, pos) {
+                            Ok(path) => s.add_attachments(&mut col.clone(), vec![path]),
+                            Err(e) => dialog::alert_default(&format!("Impossibile usare l'immagine: {e}")),
+                        }
+                        return true;
+                    }
                 }
                 false
             });
@@ -605,7 +630,13 @@ impl SendWin {
                 .iter()
                 .map(|p| {
                     let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    if p.is_dir() { format!("{n}/") } else { n }
+                    if p.is_dir() {
+                        format!("{n}/")
+                    } else if crate::net::clip_pos(&n).is_some() {
+                        "immagine incollata".to_string()
+                    } else {
+                        n
+                    }
                 })
                 .collect();
             f.set_label(&lbl(&format!("Allegati: {}", names.join(",  "))));
@@ -713,6 +744,41 @@ fn add_user_dialog(ctl: &Rc<Ctl>) {
     let _ = name.take_focus();
 }
 
+/// Cartella delle immagini incollate da inviare (si svuota dei file vecchi).
+fn clip_dir() -> PathBuf {
+    let d = config::config_dir().join("appunti");
+    let _ = std::fs::create_dir_all(&d);
+    if let Ok(rd) = std::fs::read_dir(&d) {
+        let old = std::time::Duration::from_secs(14 * 24 * 3600);
+        for e in rd.flatten() {
+            if e.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().unwrap_or_default() > old).unwrap_or(false) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    d
+}
+
+fn save_clip_png(img: &fltk::image::RgbImage, pos: u32) -> Result<PathBuf, String> {
+    use fltk::enums::ColorDepth;
+    let (w, h) = (img.data_w() as u32, img.data_h() as u32);
+    let ct = match img.depth() {
+        ColorDepth::L8 => png::ColorType::Grayscale,
+        ColorDepth::La8 => png::ColorType::GrayscaleAlpha,
+        ColorDepth::Rgb8 => png::ColorType::Rgb,
+        ColorDepth::Rgba8 => png::ColorType::Rgba,
+    };
+    let data = img.to_rgb_data();
+    let path = clip_dir().join(crate::net::clip_name(pos));
+    let f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
+    enc.set_color(ct);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut wr = enc.write_header().map_err(|e| e.to_string())?;
+    wr.write_image_data(&data).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -733,7 +799,8 @@ fn percent_decode(s: &str) -> String {
 
 // ====================================================== finestra ricevuta
 pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
-    let mut win = Window::default().with_size(420, 320).with_label("Messaggio ricevuto").center_screen();
+    let has_clips = m.files.iter().any(|f| f.is_clip());
+    let mut win = Window::default().with_size(if has_clips { 520 } else { 420 }, if has_clips { 480 } else { 320 }).with_label("Messaggio ricevuto").center_screen();
     win.make_resizable(true);
     let mut col = Flex::default_fill().column();
     col.set_margin(6);
@@ -769,6 +836,27 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
     let mut body = Flex::default().column();
     let rv = crate::rich::RichView::new();
     let mut td = rv.scroll.clone();
+    // immagini incollate: miniature sotto il testo, scaricate in automatico
+    let clips: Vec<p::FileInfo> = {
+        let mut c: Vec<p::FileInfo> = m.files.iter().filter(|f| f.is_clip()).cloned().collect();
+        c.sort_by_key(|f| f.pos.unwrap_or(0));
+        c
+    };
+    let mut imgs = fltk::group::Scroll::default();
+    imgs.set_type(fltk::group::ScrollType::Horizontal);
+    let mut thumbs = Vec::new();
+    for (i, f) in clips.iter().enumerate() {
+        let mut fr = Frame::new(imgs.x() + i as i32 * 206, 0, 200, 150, "immagine…");
+        fr.set_frame(FrameType::ThinDownBox);
+        fr.set_label_size(11);
+        fr.set_tooltip(&f.name);
+        thumbs.push((fr, f.clone()));
+    }
+    imgs.end();
+    body.fixed(&imgs, if clips.is_empty() { 0 } else { 156 });
+    if clips.is_empty() {
+        imgs.hide();
+    }
     let mut open = Button::default().with_label(if m.command & p::PASSWORDOPT != 0 { "Apri\n(sigillato con lucchetto)" } else { "Apri\n(messaggio sigillato)" });
     open.set_label_size(16);
     open.set_label_font(Font::HelveticaBold);
@@ -776,6 +864,7 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
     let _ = &buf;
     if m.sealed() {
         td.hide();
+        imgs.hide();
     } else {
         open.hide();
         rv.clone().set_text(&m.text);
@@ -785,21 +874,31 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
     let mut files = Pack::default();
     files.set_type(PackType::Vertical);
     files.set_spacing(2);
-    for f in &m.files {
+    let regular: Vec<&p::FileInfo> = m.files.iter().filter(|f| !f.is_clip()).collect();
+    for f in &regular {
         let label = if f.is_dir() { format!("Cartella:  {}/", f.name) } else { format!("File:  {}   ({})", f.name, human(f.size)) };
         let mut b = Button::default().with_size(0, 26).with_label(&lbl(&label));
         b.set_align(Align::Inside | Align::Left);
         b.set_tooltip("Salva…");
         let c = ctl.clone();
         let msg = m.clone();
-        let info = f.clone();
+        let info = (*f).clone();
         b.set_callback(move |b| save_file(&c, &msg, &info, b));
     }
     files.end();
-    col.fixed(&files, (m.files.len() as i32 * 28).max(1));
-    if m.sealed() || m.files.is_empty() {
+    col.fixed(&files, (regular.len() as i32 * 28).max(1));
+    if m.sealed() || regular.is_empty() {
         files.hide();
     }
+    let fetch_clips: Rc<dyn Fn()> = {
+        let (c, msg) = (ctl.clone(), m.clone());
+        let thumbs = thumbs.clone();
+        Rc::new(move || {
+            for (fr, info) in &thumbs {
+                fetch_clip(&c, &msg, info, fr.clone());
+            }
+        })
+    };
 
     let mut bottom = Flex::default().row();
     let mut close = Button::default().with_label("Chiudi");
@@ -819,6 +918,7 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
     let opened = Rc::new(RefCell::new(!m.sealed()));
     let do_open: Rc<dyn Fn()> = {
         let (td, open, buf, opened, c, msg) = (td.clone(), open.clone(), rv.clone(), opened.clone(), ctl.clone(), m.clone());
+        let (imgs, fc) = (imgs.clone(), fetch_clips.clone());
         let (mut col, files) = (col.clone(), files.clone());
         Rc::new(move || {
             if *opened.borrow() {
@@ -841,9 +941,14 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
             open.hide();
             buf.set_text(&msg.text);
             td.show();
-            if !msg.files.is_empty() {
+            if msg.files.iter().any(|f| !f.is_clip()) {
                 let mut f = files.clone();
                 f.show();
+            }
+            if msg.files.iter().any(|f| f.is_clip()) {
+                let mut i = imgs.clone();
+                i.show();
+                fc();
             }
             col.layout();
             c.engine.mark_read(&msg);
@@ -874,6 +979,9 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
         });
     }
     win.show();
+    if !m.sealed() {
+        fetch_clips();
+    }
     if m.sealed() {
         let _ = open.take_focus();
     } else {
@@ -935,6 +1043,52 @@ fn save_file(ctl: &Rc<Ctl>, m: &Message, info: &p::FileInfo, b: &mut Button) {
             }
             Err(_) => {}
         }
+        app::awake();
+    });
+}
+
+/// Scarica un'immagine incollata e la mostra come miniatura (clic per aprirla).
+fn fetch_clip(ctl: &Rc<Ctl>, m: &Message, info: &p::FileInfo, mut fr: Frame) {
+    let dir = config::config_dir().join("immagini");
+    let _ = std::fs::create_dir_all(&dir);
+    let eng = ctl.engine.clone();
+    let (m, info) = (m.clone(), info.clone());
+    let n_files = m.files.len();
+    let done = ctl.downloaded.clone();
+    std::thread::spawn(move || {
+        let cancel = AtomicBool::new(false);
+        let res = eng.download(&m, &info, &dir, &mut |_, _, _| {}, &cancel);
+        let all = {
+            let mut d = done.lock().unwrap();
+            let e = d.entry(m.packet_no).or_insert(0);
+            *e += 1;
+            *e >= n_files
+        };
+        if all {
+            eng.release_files(&m);
+        }
+        if fr.was_deleted() {
+            return;
+        }
+        match res.ok().and_then(|p| fltk::image::SharedImage::load(&p).ok().map(|i| (p, i))) {
+            Some((path, mut img)) => {
+                let (w, h) = (img.data_w() as f64, img.data_h() as f64);
+                let k = (196.0 / w).min(146.0 / h).min(1.0);
+                img.scale((w * k) as i32, (h * k) as i32, true, true);
+                fr.set_label("");
+                fr.set_image(Some(img));
+                fr.set_tooltip("Clic per aprire l'immagine");
+                fr.handle(move |_, ev| {
+                    if ev == Event::Push {
+                        open_path(&path);
+                        return true;
+                    }
+                    false
+                });
+            }
+            None => fr.set_label("immagine non disponibile"),
+        }
+        fr.redraw();
         app::awake();
     });
 }

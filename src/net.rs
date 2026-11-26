@@ -301,7 +301,7 @@ impl Engine {
     // --------------------------------------------------------- presenza
     fn entry(&self) -> (u32, String, Vec<String>) {
         let s = self.lock();
-        let mut opt = p::CAPUTF8OPT | p::FILEATTACHOPT;
+        let mut opt = p::CAPUTF8OPT | p::FILEATTACHOPT | p::CLIPBOARDOPT;
         if s.key.is_some() {
             opt |= p::ENCRYPTOPT | p::ENCEXTMSGOPT;
         }
@@ -410,20 +410,29 @@ impl Engine {
         }
     }
 
-    /// Invia un messaggio a ciascun destinatario; restituisce i numeri di pacchetto.
+    /// Invia un messaggio a ciascun destinatario.
+    /// Le immagini incollate sono file "popmsg_clip_<n>_<posizione>.png" (vedi `clip_name`).; restituisce i numeri di pacchetto.
     /// `sealed`: 0 = normale, 1 = sigillato, 2 = sigillato con lucchetto (password)
     pub fn send_message(&self, users: &[User], text: &str, sealed: u8, attachments: &[PathBuf]) -> Vec<u64> {
         let mut files = Vec::new();
         for (i, path) in attachments.iter().enumerate() {
             let Ok(md) = fs::metadata(path) else { continue };
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+            let pos = clip_pos(&name);
             let mtime = md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
             let info = FileInfo {
                 id: i as u32,
                 name,
                 size: if md.is_dir() { 0 } else { md.len() },
                 mtime,
-                attr: if md.is_dir() { p::FILE_DIR } else { p::FILE_REGULAR },
+                attr: if md.is_dir() {
+                    p::FILE_DIR
+                } else if pos.is_some() {
+                    p::FILE_CLIPBOARD
+                } else {
+                    p::FILE_REGULAR
+                },
+                pos,
             };
             files.push(Arc::new(Shared { path: path.clone(), info }));
         }
@@ -1026,4 +1035,16 @@ pub fn unique_path(p: &Path) -> PathBuf {
     let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     let dir = p.parent().unwrap_or(Path::new("."));
     (1..).map(|i| dir.join(format!("{stem} ({i}){ext}"))).find(|c| !c.exists()).unwrap()
+}
+
+/// Nome del file per un'immagine incollata alla posizione `pos` del testo.
+pub fn clip_name(pos: u32) -> String {
+    let n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    format!("popmsg_clip_{n}_{pos}.png")
+}
+
+/// Posizione nel testo se il nome è quello di un'immagine incollata.
+pub fn clip_pos(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("popmsg_clip_")?.strip_suffix(".png")?;
+    rest.rsplit('_').next()?.parse().ok()
 }

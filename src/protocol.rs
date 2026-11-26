@@ -59,6 +59,9 @@ pub const SECRETEXOPT: u32 = READCHECKOPT | SECRETOPT;
 pub const FILE_REGULAR: u32 = 0x1;
 pub const FILE_DIR: u32 = 0x2;
 pub const FILE_RETPARENT: u32 = 0x3;
+/// immagine incollata dagli appunti (mostrata dentro il messaggio)
+pub const FILE_CLIPBOARD: u32 = 0x20;
+pub const FILE_CLIPBOARDPOS: u32 = 0x8;
 pub const FILE_MTIME: u32 = 0x14;
 
 pub const FILELIST_SEPARATOR: char = '\u{7}';
@@ -206,11 +209,16 @@ pub struct FileInfo {
     pub size: u64,
     pub mtime: u64,
     pub attr: u32,
+    /// posizione nel testo delle immagini incollate
+    pub pos: Option<u32>,
 }
 
 impl FileInfo {
     pub fn is_dir(&self) -> bool {
         mode(self.attr) == FILE_DIR
+    }
+    pub fn is_clip(&self) -> bool {
+        mode(self.attr) == FILE_CLIPBOARD
     }
 }
 
@@ -221,7 +229,11 @@ pub fn escape_name(n: &str) -> String {
 pub fn build_file_list(files: &[FileInfo]) -> String {
     let mut s = String::new();
     for f in files {
-        s.push_str(&format!("{}:{}:{:x}:{:x}:{:x}:", f.id, escape_name(&f.name), f.size, f.mtime, f.attr));
+        let pos = match (f.is_clip(), f.pos) {
+            (true, Some(p)) => format!(":{FILE_CLIPBOARDPOS:x}={p:x}"),
+            _ => String::new(),
+        };
+        s.push_str(&format!("{}:{}:{:x}:{:x}:{:x}{pos}:", f.id, escape_name(&f.name), f.size, f.mtime, f.attr));
         s.push(FILELIST_SEPARATOR);
     }
     s
@@ -267,7 +279,12 @@ pub fn parse_file_list(s: &str) -> Vec<FileInfo> {
         ) else {
             continue;
         };
-        out.push(FileInfo { id, name: f[1].clone(), size, mtime, attr });
+        let pos = f[5..]
+            .iter()
+            .filter_map(|x| x.split_once('='))
+            .find(|(k, _)| u32::from_str_radix(k, 16) == Ok(FILE_CLIPBOARDPOS))
+            .and_then(|(_, v)| u32::from_str_radix(v, 16).ok());
+        out.push(FileInfo { id, name: f[1].clone(), size, mtime, attr, pos });
     }
     out
 }
@@ -307,8 +324,9 @@ mod tests {
     #[test]
     fn roundtrip() {
         let files = vec![
-            FileInfo { id: 0, name: "a:b.txt".into(), size: 10, mtime: 5, attr: FILE_REGULAR },
-            FileInfo { id: 1, name: "dir".into(), size: 0, mtime: 5, attr: FILE_DIR },
+            FileInfo { id: 0, name: "a:b.txt".into(), size: 10, mtime: 5, attr: FILE_REGULAR, pos: None },
+            FileInfo { id: 1, name: "dir".into(), size: 0, mtime: 5, attr: FILE_DIR, pos: None },
+            FileInfo { id: 2, name: "clip.png".into(), size: 99, mtime: 5, attr: FILE_CLIPBOARD, pos: Some(12) },
         ];
         assert_eq!(parse_file_list(&build_file_list(&files)), files);
         let h = dir_header("x:y", 255, FILE_REGULAR, 99);
