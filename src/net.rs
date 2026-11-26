@@ -62,6 +62,8 @@ pub struct Message {
     pub files: Vec<FileInfo>,
     pub encrypted: bool,
     pub decrypt_error: String,
+    /// firma digitale: None = assente, Some(true) = verificata, Some(false) = non valida
+    pub signed: Option<bool>,
 }
 
 impl Message {
@@ -474,11 +476,11 @@ impl Engine {
     }
 
     fn dispatch(&self, a: Addr, no: u64, mut cmd: u32, text: &str, file_list: &str, allow_enc: bool) {
-        let (peer, ext) = {
+        let (peer, ext, key) = {
             let s = self.lock();
             let peer = if s.encryption && allow_enc { s.peer_keys.get(&a).cloned() } else { None };
             let ext = s.users.get(&a).map(|u| u.command & p::ENCEXTMSGOPT != 0).unwrap_or(false);
-            (peer, ext)
+            (peer, ext, s.key.clone())
         };
         let mut extra = text.to_string();
         let mut tail: Vec<String> = if file_list.is_empty() { vec![] } else { vec![file_list.to_string()] };
@@ -491,7 +493,7 @@ impl Engine {
                 c2 |= p::ENCEXTMSGOPT;
             }
             let plain = p::encrypted_body(text, if with_files { file_list } else { "" });
-            match crypto::encrypt(&peer, plain.as_bytes(), no) {
+            match crypto::encrypt(&peer, plain.as_bytes(), no, key.as_deref()) {
                 Ok(enc) => {
                     extra = enc;
                     cmd = c2 | p::ENCRYPTOPT;
@@ -614,6 +616,14 @@ impl Engine {
         if ask {
             self.reply(a, p::POPMSG_GETLIST, "");
         }
+        // chiave pubblica chiesta subito: serve anche a verificare le firme dei suoi messaggi
+        let want_key = {
+            let s = self.lock();
+            s.encryption && pk.command & p::ENCRYPTOPT != 0 && !s.peer_keys.contains_key(&a) && matches!(pk.mode(), p::BR_ENTRY | p::ANSENTRY)
+        };
+        if want_key {
+            self.reply(a, p::GETPUBKEY, &format!("{:X}", crypto::OUR_CAPS));
+        }
     }
 
     fn user_or_stub(&self, pk: &Packet, a: Addr) -> User {
@@ -709,14 +719,15 @@ impl Engine {
         if pk.has(p::SENDCHECKOPT) && !pk.has(p::AUTORETOPT | p::BROADCASTOPT) {
             self.reply(a, p::RECVMSG, &pk.packet_no.to_string());
         }
-        let (known, absent, absence_text, key) = {
+        let (known, absent, absence_text, key, sender_key) = {
             let mut s = self.lock();
+            let sender_key = s.peer_keys.get(&a).map(|k| k.key.clone());
             let k = (a, pk.packet_no);
             if s.recent.contains_key(&k) {
                 return; // ritrasmissione già ricevuta
             }
             s.recent.insert(k, Instant::now());
-            (s.users.contains_key(&a), s.absent, s.absence_text.clone(), s.key.clone())
+            (s.users.contains_key(&a), s.absent, s.absence_text.clone(), s.key.clone(), sender_key)
         };
         if !known && !pk.has(p::NOADDLISTOPT) {
             let (cmd, nick, tail) = self.entry();
@@ -727,12 +738,21 @@ impl Engine {
         let mut text = pk.message.clone();
         let mut file_text = pk.tail.first().cloned().unwrap_or_default();
         let mut encrypted = false;
+        let mut signed = None;
         let mut err = String::new();
         if pk.has(p::ENCRYPTOPT) {
             match key {
                 None => err = "cifratura disattivata".into(),
                 Some(k) => match crypto::decrypt(&k, &pk.message, pk.packet_no) {
-                    Ok(plain) => {
+                    Ok(d) => {
+                        if let Some(sig) = &d.signature {
+                            match &sender_key {
+                                Some(pubk) => signed = Some(crypto::verify(pubk, &d.plain, sig)),
+                                // chiave del mittente non ancora nota: la chiediamo per i prossimi
+                                None => self.reply(a, p::GETPUBKEY, &format!("{:X}", crypto::OUR_CAPS)),
+                            }
+                        }
+                        let plain = d.plain;
                         let dec = p::decode(&plain, pk.has(p::UTF8OPT));
                         let mut it = dec.split('\0');
                         text = it.next().unwrap_or("").to_string();
@@ -765,6 +785,7 @@ impl Engine {
             files,
             encrypted,
             decrypt_error: err,
+            signed,
         })));
     }
 

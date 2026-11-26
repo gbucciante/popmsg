@@ -66,11 +66,13 @@ fn end_to_end() {
     assert_eq!(ub.group, "G-Bruno");
     assert!(a.will_encrypt(&ub));
 
-    // messaggio sigillato e cifrato + avviso di apertura
+    // messaggio sigillato e cifrato + avviso di apertura (con firma digitale)
+    std::thread::sleep(std::time::Duration::from_millis(400)); // scambio delle chiavi
     let no = a.send_message(&[ub.clone()], "Ciao Bruno, è sigillato 😊", 1, &[])[0];
     let m = msg(&rb);
     assert_eq!(m.text, "Ciao Bruno, è sigillato 😊");
     assert!(m.sealed() && m.encrypted);
+    assert_eq!(m.signed, Some(true));
     wait(&ra, |e| matches!(e, Event::Delivered(n) if *n == no).then_some(()));
     b.mark_read(&m);
     wait(&ra, |e| matches!(e, Event::Opened(n, _) if *n == no).then_some(()));

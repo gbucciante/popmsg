@@ -13,7 +13,7 @@ use base64::Engine as _;
 use rand::RngCore;
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;
-use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use rsa::{BigUint, Pkcs1v15Encrypt, Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey};
 use sha2::{Digest, Sha256};
 
 pub const RSA_512: u32 = 0x0000_0001;
@@ -27,7 +27,7 @@ pub const ENCODE_BASE64: u32 = 0x0100_0000;
 pub const SIGN_SHA1: u32 = 0x2000_0000;
 pub const SIGN_SHA256: u32 = 0x4000_0000;
 
-pub const OUR_CAPS: u32 = RSA_2048 | RSA_1024 | AES_256 | PACKETNO_IV | ENCODE_BASE64;
+pub const OUR_CAPS: u32 = RSA_2048 | RSA_1024 | AES_256 | PACKETNO_IV | ENCODE_BASE64 | SIGN_SHA256;
 
 type Enc = cbc::Encryptor<aes::Aes256>;
 type Dec = cbc::Decryptor<aes::Aes256>;
@@ -111,11 +111,29 @@ pub fn choose_caps(peer: &PeerKey) -> u32 {
     if peer.caps & PACKETNO_IV != 0 {
         caps |= PACKETNO_IV;
     }
+    // firma digitale SHA-256 (come IP Messenger 3 e successivi), solo con RSA 2048
+    if peer.caps & SIGN_SHA256 != 0 && caps & RSA_2048 != 0 {
+        caps |= SIGN_SHA256;
+    }
     caps
 }
 
-pub fn encrypt(peer: &PeerKey, plain: &[u8], packet_no: u64) -> Result<String, String> {
-    let caps = choose_caps(peer);
+/// Firma RSA PKCS#1 v1.5 SHA-256 del testo in chiaro.
+pub fn sign(k: &RsaPrivateKey, data: &[u8]) -> Option<Vec<u8>> {
+    k.sign(Pkcs1v15Sign::new::<Sha256>(), &Sha256::digest(data)).ok()
+}
+
+pub fn verify(k: &RsaPublicKey, data: &[u8], sig: &[u8]) -> bool {
+    k.verify(Pkcs1v15Sign::new::<Sha256>(), &Sha256::digest(data), sig).is_ok()
+}
+
+/// Cifra per `peer`; con `signer` aggiunge la firma digitale se il destinatario la supporta.
+pub fn encrypt(peer: &PeerKey, plain: &[u8], packet_no: u64, signer: Option<&RsaPrivateKey>) -> Result<String, String> {
+    let mut caps = choose_caps(peer);
+    let sig = if caps & SIGN_SHA256 != 0 { signer.and_then(|k| sign(k, plain)) } else { None };
+    if sig.is_none() {
+        caps &= !SIGN_SHA256;
+    }
     if caps == 0 {
         return Err("il destinatario non supporta AES-256".into());
     }
@@ -126,10 +144,21 @@ pub fn encrypt(peer: &PeerKey, plain: &[u8], packet_no: u64) -> Result<String, S
         .encrypt(&mut rand::thread_rng(), Pkcs1v15Encrypt, &session)
         .map_err(|e| e.to_string())?;
     let ct = Enc::new(&session.into(), &iv(caps, packet_no).into()).encrypt_padded_vec_mut::<Pkcs7>(plain);
-    Ok(format!("{:X}:{}:{}", caps, enc_bytes(&ek, caps), enc_bytes(&ct, caps)))
+    let mut out = format!("{:X}:{}:{}", caps, enc_bytes(&ek, caps), enc_bytes(&ct, caps));
+    if let Some(sig) = sig {
+        out.push(':');
+        out.push_str(&enc_bytes(&sig, caps));
+    }
+    Ok(out)
 }
 
-pub fn decrypt(k: &RsaPrivateKey, text: &str, packet_no: u64) -> Result<Vec<u8>, String> {
+/// Testo decifrato e, se presente, la firma digitale da verificare.
+pub struct Decrypted {
+    pub plain: Vec<u8>,
+    pub signature: Option<Vec<u8>>,
+}
+
+pub fn decrypt(k: &RsaPrivateKey, text: &str, packet_no: u64) -> Result<Decrypted, String> {
     let parts: Vec<&str> = text.split(':').collect();
     if parts.len() < 3 {
         return Err("formato non valido".into());
@@ -140,6 +169,7 @@ pub fn decrypt(k: &RsaPrivateKey, text: &str, packet_no: u64) -> Result<Vec<u8>,
     }
     let ek = dec_bytes(parts[1], caps).ok_or("codifica della chiave non valida")?;
     let ct = dec_bytes(parts[2], caps).ok_or("codifica del messaggio non valida")?;
+    let signature = if caps & SIGN_SHA256 != 0 { parts.get(3).and_then(|s| dec_bytes(s, caps)) } else { None };
     // CryptoAPI di Windows usa l'ordine dei byte inverso: proviamo entrambi
     let mut rev = ek.clone();
     rev.reverse();
@@ -150,8 +180,8 @@ pub fn decrypt(k: &RsaPrivateKey, text: &str, packet_no: u64) -> Result<Vec<u8>,
     let mut key = [0u8; 32];
     key.copy_from_slice(&session);
     let dec = Dec::new(&key.into(), &iv(caps, packet_no).into());
-    match dec.clone().decrypt_padded_vec_mut::<Pkcs7>(&ct) {
-        Ok(v) => Ok(v),
+    let plain = match dec.clone().decrypt_padded_vec_mut::<Pkcs7>(&ct) {
+        Ok(v) => v,
         Err(_) => {
             // senza padding: rimuovi gli zeri finali
             let mut buf = ct.clone();
@@ -161,9 +191,10 @@ pub fn decrypt(k: &RsaPrivateKey, text: &str, packet_no: u64) -> Result<Vec<u8>,
             while v.last() == Some(&0) {
                 v.pop();
             }
-            Ok(v)
+            v
         }
-    }
+    };
+    Ok(Decrypted { plain, signature })
 }
 
 #[cfg(test)]
@@ -179,8 +210,14 @@ mod tests {
             if b64 {
                 peer.caps |= ENCODE_BASE64;
             }
-            let ct = encrypt(&peer, "segreto àèì".as_bytes(), 123456).unwrap();
-            assert_eq!(decrypt(&k, &ct, 123456).unwrap(), "segreto àèì".as_bytes());
+            let ct = encrypt(&peer, "segreto àèì".as_bytes(), 123456, None).unwrap();
+            assert_eq!(decrypt(&k, &ct, 123456).unwrap().plain, "segreto àèì".as_bytes());
+            // con firma
+            let ct = encrypt(&peer, b"firmato\0", 99, Some(&k)).unwrap();
+            assert_eq!(ct.split(':').count(), 4);
+            let d = decrypt(&k, &ct, 99).unwrap();
+            assert!(verify(&k.to_public_key(), &d.plain, &d.signature.unwrap()));
+            assert!(!verify(&k.to_public_key(), b"altro", &sign(&k, b"x").unwrap()));
         }
         let k2 = from_pem(&to_pem(&k)).unwrap();
         assert_eq!(fingerprint(&k.to_public_key()), fingerprint(&k2.to_public_key()));

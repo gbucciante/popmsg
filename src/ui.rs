@@ -753,7 +753,12 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
     let mut h1 = Frame::default().with_label(&lbl(&format!("{kind}  {}{}", s.name(), if detail.is_empty() { String::new() } else { format!("  ({})", detail.join("/")) })));
     h1.set_align(Align::Inside | Align::Left);
     h1.set_label_font(Font::HelveticaBold);
-    let enc = if m.encrypted { "    [cifrato]" } else { "" };
+    let enc = match (m.encrypted, m.signed) {
+        (true, Some(true)) => "    [cifrato, firma verificata]",
+        (true, Some(false)) => "    [cifrato, FIRMA NON VALIDA]",
+        (true, None) => "    [cifrato]",
+        _ => "",
+    };
     let mut h2 = Frame::default().with_label(&lbl(&format!("{}{enc}", time_label(m.received_at))));
     h2.set_align(Align::Inside | Align::Left);
     h2.set_label_size(12);
