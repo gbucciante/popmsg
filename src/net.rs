@@ -383,7 +383,8 @@ impl Engine {
     }
 
     /// Invia un messaggio a ciascun destinatario; restituisce i numeri di pacchetto.
-    pub fn send_message(&self, users: &[User], text: &str, sealed: bool, attachments: &[PathBuf]) -> Vec<u64> {
+    /// `sealed`: 0 = normale, 1 = sigillato, 2 = sigillato con lucchetto (password)
+    pub fn send_message(&self, users: &[User], text: &str, sealed: u8, attachments: &[PathBuf]) -> Vec<u64> {
         let mut files = Vec::new();
         for (i, path) in attachments.iter().enumerate() {
             let Ok(md) = fs::metadata(path) else { continue };
@@ -409,8 +410,11 @@ impl Engine {
             if users.len() > 1 {
                 cmd |= p::MULTICASTOPT;
             }
-            if sealed {
+            if sealed > 0 {
                 cmd |= p::SECRETEXOPT;
+            }
+            if sealed == 2 {
+                cmd |= p::PASSWORDOPT;
             }
             if !files.is_empty() {
                 cmd |= p::FILEATTACHOPT;

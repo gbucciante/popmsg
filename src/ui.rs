@@ -214,6 +214,7 @@ pub struct SendWin {
     count: Frame,
     buf: TextBuffer,
     seal: CheckButton,
+    lock: CheckButton,
     att: Rc<RefCell<Vec<PathBuf>>>,
     att_lbl: Frame,
 }
@@ -286,7 +287,17 @@ impl SendWin {
         bottom.fixed(&attach, 80);
         bottom.fixed(&groups, 80);
         bottom.fixed(&emo, 40);
-        bottom.fixed(&seal, 80);
+        let mut lock = CheckButton::default().with_label("Lucchetto");
+        lock.set_tooltip("Il destinatario deve inserire la sua password di POPMSG / IP Messenger per aprirlo");
+        if !seal.value() {
+            lock.deactivate();
+        }
+        {
+            let mut l = lock.clone();
+            seal.set_callback(move |s| if s.value() { l.activate() } else { l.set_value(false); l.deactivate() });
+        }
+        bottom.fixed(&seal, 75);
+        bottom.fixed(&lock, 95);
         bottom.fixed(&send, 120);
         bottom.end();
 
@@ -304,6 +315,7 @@ impl SendWin {
             count,
             buf,
             seal,
+            lock,
             att: Rc::new(RefCell::new(Vec::new())),
             att_lbl,
         });
@@ -425,7 +437,7 @@ impl SendWin {
                 if text.trim().is_empty() && att.is_empty() {
                     return;
                 }
-                c.send_targets(&users, &text, s.seal.value(), &att);
+                c.send_targets(&users, &text, if !s.seal.value() { 0 } else if s.lock.value() { 2 } else { 1 }, &att);
                 let mut w = s.win.clone();
                 w.do_callback();
             })
@@ -752,7 +764,7 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
     let mut body = Flex::default().column();
     let rv = crate::rich::RichView::new();
     let mut td = rv.scroll.clone();
-    let mut open = Button::default().with_label("Apri\n(messaggio sigillato)");
+    let mut open = Button::default().with_label(if m.command & p::PASSWORDOPT != 0 { "Apri\n(sigillato con lucchetto)" } else { "Apri\n(messaggio sigillato)" });
     open.set_label_size(16);
     open.set_label_font(Font::HelveticaBold);
     body.end();
@@ -807,6 +819,18 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
             if *opened.borrow() {
                 return;
             }
+            // lucchetto: serve la password impostata su questo computer
+            let (stored, all) = {
+                let cfg = c.cfg.borrow();
+                (cfg.password.clone(), cfg.password_all)
+            };
+            if !stored.is_empty() && (msg.command & p::PASSWORDOPT != 0 || all) {
+                let Some(pw) = dialog::password_default("Messaggio sigillato con lucchetto.\nInserisci la tua password:", "") else { return };
+                if !config::password_check(&stored, &pw) {
+                    dialog::alert_default("Password errata.");
+                    return;
+                }
+            }
             *opened.borrow_mut() = true;
             let (mut open, mut buf, mut td, mut col) = (open.clone(), buf.clone(), td.clone(), col.clone());
             open.hide();
@@ -829,9 +853,12 @@ pub fn recv_window(ctl: &Rc<Ctl>, m: Message) {
         close.set_callback(move |_| w.do_callback());
     }
     {
-        let (c, msg, f, mut w) = (ctl.clone(), m.clone(), do_open.clone(), win.clone());
+        let (c, msg, f, mut w, op) = (ctl.clone(), m.clone(), do_open.clone(), win.clone(), opened.clone());
         reply.set_callback(move |_| {
             f();
+            if !*op.borrow() {
+                return; // password non inserita
+            }
             let q = if quote.value() && !msg.text.trim().is_empty() {
                 msg.text.trim_end().lines().map(|l| format!("> {l}\n")).collect::<String>()
             } else {
@@ -919,7 +946,7 @@ fn open_path(p: &Path) {
 // ============================================================ impostazioni
 fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     let cfg = ctl.cfg.borrow().clone();
-    let mut win = Window::default().with_size(480, 520).with_label("Impostazioni di POPMSG").center_screen();
+    let mut win = Window::default().with_size(500, 620).with_label("Impostazioni di POPMSG").center_screen();
     let mut col = Flex::default_fill().column();
     col.set_margin(10);
     col.set_pad(6);
@@ -950,8 +977,35 @@ fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     let seal = check("Sigilla i messaggi per impostazione predefinita", cfg.seal, &mut col);
     let enc = check("Cifra i messaggi (RSA 2048 + AES 256)", cfg.encryption, &mut col);
     let offline = check("Mostra in grigio chi non è in linea e tieni i messaggi in attesa", cfg.offline, &mut col);
+    let share = check("Scambia automaticamente l'elenco utenti con gli altri POPMSG", cfg.share_list, &mut col);
     let log = check("Registra i messaggi su file", cfg.log_enabled, &mut col);
     let auto = check("Avvia POPMSG all'accesso a Windows", config::autostart_enabled(), &mut col);
+    // password per aprire i messaggi sigillati
+    let mut pr = Flex::default().row();
+    let pl = Frame::default()
+        .with_label(if cfg.password.is_empty() { "Password sigillati: nessuna" } else { "Password sigillati: impostata" })
+        .with_align(Align::Inside | Align::Left);
+    let mut pbtn = Button::default().with_label("Imposta…");
+    pr.fixed(&pbtn, 90);
+    pr.end();
+    col.fixed(&pr, 26);
+    let pw_all = check("Chiedi la password per aprire tutti i messaggi sigillati", cfg.password_all, &mut col);
+    let new_pw: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    {
+        let (np, mut pl) = (new_pw.clone(), pl.clone());
+        pbtn.set_callback(move |_| {
+            let Some(a) = dialog::password_default("Nuova password per aprire i messaggi sigillati\n(vuota = nessuna password):", "") else { return };
+            if !a.is_empty() {
+                let Some(b) = dialog::password_default("Ripeti la password:", "") else { return };
+                if a != b {
+                    dialog::alert_default("Le due password non coincidono.");
+                    return;
+                }
+            }
+            pl.set_label(if a.is_empty() { "Password sigillati: nessuna" } else { "Password sigillati: impostata" });
+            *np.borrow_mut() = Some(a);
+        });
+    }
     if !cfg!(windows) {
         let mut a = auto.clone();
         a.hide();
@@ -1006,6 +1060,11 @@ fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     c.encryption = enc.value();
     c.offline = offline.value();
     c.log_enabled = log.value();
+    c.share_list = share.value();
+    c.password_all = pw_all.value();
+    if let Some(pw) = new_pw.borrow().as_ref() {
+        c.password = if pw.is_empty() { String::new() } else { config::password_hash(pw) };
+    }
     if cfg!(windows) && auto.value() != config::autostart_enabled() {
         config::set_autostart(auto.value());
     }
@@ -1013,17 +1072,46 @@ fn settings_dialog(ctl: &Rc<Ctl>) -> bool {
     true
 }
 
+/// Messaggi del registro che contengono tutte le parole cercate (maiuscole indifferenti).
+fn log_filter(all: &str, query: &str) -> (String, usize) {
+    let sep = format!("{}\n", "=".repeat(38));
+    let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+    let hits: Vec<&str> = all
+        .split(sep.as_str())
+        .filter(|e| !e.trim().is_empty())
+        .filter(|e| {
+            let low = e.to_lowercase();
+            words.iter().all(|w| low.contains(w.as_str()))
+        })
+        .collect();
+    let n = hits.len();
+    (hits.into_iter().map(|e| format!("{sep}{e}")).collect(), n)
+}
+
 fn log_viewer(path: &str) {
-    let mut win = Window::default().with_size(640, 520).with_label("Registro messaggi").center_screen();
+    let mut win = Window::default().with_size(680, 540).with_label("Registro messaggi").center_screen();
     win.make_resizable(true);
     let mut col = Flex::default_fill().column();
     col.set_margin(6);
+    col.set_pad(4);
     let mut top = Flex::default().row();
-    let search = Input::default();
-    let mut find = ReturnButton::default().with_label("Trova");
+    let mut l = Frame::default().with_label("Cerca:");
+    l.set_align(Align::Inside | Align::Right);
+    let mut search = Input::default();
+    search.set_tooltip("Parole, nome, gruppo o data (es. 25/11/2026): mostra solo i messaggi che le contengono tutte");
+    let mut find = ReturnButton::default().with_label("Cerca");
+    let mut next = Button::default().with_label("Successivo");
+    let mut all = Button::default().with_label("Tutto");
+    top.fixed(&l, 50);
     top.fixed(&find, 80);
+    top.fixed(&next, 90);
+    top.fixed(&all, 60);
     top.end();
     col.fixed(&top, 28);
+    let mut status = Frame::default();
+    status.set_align(Align::Inside | Align::Left);
+    status.set_label_size(12);
+    col.fixed(&status, 16);
     let mut buf = TextBuffer::default();
     let mut td = TextDisplay::default();
     td.set_buffer(buf.clone());
@@ -1032,28 +1120,59 @@ fn log_viewer(path: &str) {
     col.end();
     win.end();
     setup_window(&mut win);
-    buf.set_text(&std::fs::read_to_string(path).unwrap_or_else(|_| "(Il registro è vuoto.)".into()));
+    let text = Rc::new(std::fs::read_to_string(path).unwrap_or_else(|_| "(Il registro è vuoto.)".into()));
+    buf.set_text(&text);
     let len = buf.length();
     td.set_insert_position(len);
     td.show_insert_position();
-    {
-        let (buf, mut td) = (buf.clone(), td.clone());
-        find.set_callback(move |_| {
-            let q = search.value();
-            if q.is_empty() {
-                return;
-            }
-            let start = td.insert_position();
-            let pos = buf.search_backward(start - 1, &q, false).or_else(|| buf.search_backward(buf.length(), &q, false));
+    // evidenzia la prossima parola trovata a partire dalla posizione attuale
+    let highlight: Rc<dyn Fn(bool)> = {
+        let (buf, td, search) = (buf.clone(), td.clone(), search.clone());
+        Rc::new(move |from_start: bool| {
+            let Some(w) = search.value().split_whitespace().next().map(|w| w.to_string()) else { return };
+            let mut td = td.clone();
+            let start = if from_start { 0 } else { td.insert_position() + 1 };
+            let pos = buf.search_forward(start.min(buf.length()), &w, false).or_else(|| buf.search_forward(0, &w, false));
             if let Some(pos) = pos {
                 let mut b = buf.clone();
-                b.select(pos, pos + q.len() as i32);
+                b.select(pos, pos + w.len() as i32);
                 td.set_insert_position(pos);
                 td.show_insert_position();
             }
+        })
+    };
+    {
+        let (text, mut buf, mut status, search, h) = (text.clone(), buf.clone(), status.clone(), search.clone(), highlight.clone());
+        find.set_callback(move |_| {
+            let q = search.value();
+            if q.trim().is_empty() {
+                return;
+            }
+            let (t, n) = log_filter(&text, &q);
+            if n == 0 {
+                status.set_label(&lbl(&format!("Nessun messaggio contiene «{}».", q.trim())));
+                return;
+            }
+            buf.set_text(&t);
+            status.set_label(&lbl(&format!("{n} messaggi contengono «{}».  «Tutto» mostra di nuovo l'intero registro.", q.trim())));
+            h(true);
+        });
+    }
+    {
+        let h = highlight.clone();
+        next.set_callback(move |_| h(false));
+    }
+    {
+        let (text, mut buf, mut status, mut td) = (text.clone(), buf.clone(), status.clone(), td.clone());
+        all.set_callback(move |_| {
+            buf.set_text(&text);
+            status.set_label("");
+            td.set_insert_position(buf.length());
+            td.show_insert_position();
         });
     }
     win.show();
+    let _ = search.take_focus();
 }
 
 // ============================================================ controllore
@@ -1061,7 +1180,7 @@ pub struct Ctl {
     pub engine: Engine,
     pub cfg: RefCell<Config>,
     send_wins: RefCell<Vec<Rc<SendWin>>>,
-    sent: RefCell<HashMap<u64, (User, String, bool, Vec<PathBuf>)>>,
+    sent: RefCell<HashMap<u64, (User, String, u8, Vec<PathBuf>)>>,
     unread: RefCell<Vec<Message>>,
     pub tray: RefCell<Option<Tray>>,
     absence_sel: RefCell<Option<usize>>,
@@ -1155,7 +1274,7 @@ impl Ctl {
         self.targets().into_iter().find(|t| t.0.book_key() == key)
     }
 
-    pub fn send_targets(&self, targets: &[(User, bool)], text: &str, sealed: bool, att: &[PathBuf]) {
+    pub fn send_targets(&self, targets: &[(User, bool)], text: &str, sealed: u8, att: &[PathBuf]) {
         let online: Vec<User> = targets.iter().filter(|t| t.1).map(|t| t.0.clone()).collect();
         if !online.is_empty() {
             self.send(&online, text, sealed, att);
@@ -1206,7 +1325,7 @@ impl Ctl {
         }
     }
 
-    pub fn send(&self, users: &[User], text: &str, sealed: bool, att: &[PathBuf]) {
+    pub fn send(&self, users: &[User], text: &str, sealed: u8, att: &[PathBuf]) {
         let nos = self.engine.send_message(users, text, sealed, att);
         let mut sent = self.sent.borrow_mut();
         for (no, u) in nos.iter().zip(users) {
@@ -1216,7 +1335,9 @@ impl Ctl {
         if cfg.log_enabled {
             let who: Vec<String> = users.iter().map(|u| format!("{} ({}/{})", u.name(), u.group, u.host)).collect();
             let mut flags = vec![];
-            if sealed {
+            if sealed == 2 {
+                flags.push("sigillato con lucchetto");
+            } else if sealed == 1 {
                 flags.push("sigillato");
             }
             if users.iter().all(|u| self.engine.will_encrypt(u)) {

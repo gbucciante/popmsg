@@ -67,7 +67,7 @@ fn end_to_end() {
     assert!(a.will_encrypt(&ub));
 
     // messaggio sigillato e cifrato + avviso di apertura
-    let no = a.send_message(&[ub.clone()], "Ciao Bruno, è sigillato 😊", true, &[])[0];
+    let no = a.send_message(&[ub.clone()], "Ciao Bruno, è sigillato 😊", 1, &[])[0];
     let m = msg(&rb);
     assert_eq!(m.text, "Ciao Bruno, è sigillato 😊");
     assert!(m.sealed() && m.encrypted);
@@ -94,7 +94,7 @@ fn end_to_end() {
     let (src_name, dst_name) = if cfg!(windows) { ("due tre.txt", "due tre.txt") } else { ("due:tre.txt", "due_tre.txt") };
     std::fs::write(src.join("cartella/sub").join(src_name), "due".repeat(1000)).unwrap();
     let att: Vec<PathBuf> = vec![src.join("doc.bin"), src.join("cartella")];
-    a.send_message(&[ub.clone()], "allegati", false, &att);
+    a.send_message(&[ub.clone()], "allegati", 0, &att);
     let m = msg(&rb);
     assert!(m.encrypted && m.command & p::ENCEXTMSGOPT != 0);
     assert_eq!(m.files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["doc.bin", "cartella"]);
@@ -112,7 +112,7 @@ fn end_to_end() {
     let (c3, rc) = eng("Carla", 25303, &[25301], false);
     until(|| a.users().iter().any(|u| u.nick == "Carla"));
     let uc = a.users().into_iter().find(|u| u.nick == "Carla").unwrap();
-    a.send_message(&[uc], "in chiaro", false, &[]);
+    a.send_message(&[uc], "in chiaro", 0, &[]);
     let m = msg(&rc);
     assert!(m.text == "in chiaro" && !m.encrypted);
     c3.stop();

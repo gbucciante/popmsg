@@ -57,6 +57,12 @@ pub struct Config {
     pub offline: bool,
     pub download_dir: String,
     pub absence_text: String,
+    /// impronta della password per aprire i messaggi sigillati ("" = nessuna)
+    pub password: String,
+    /// chiedi la password per tutti i messaggi sigillati, non solo per quelli col lucchetto
+    pub password_all: bool,
+    /// scambia automaticamente l'elenco utenti con gli altri POPMSG
+    pub share_list: bool,
 }
 
 impl Config {
@@ -85,11 +91,15 @@ impl Config {
             sound: b("sound", true),
             popup: b("popup", true),
             quote: b("quote", true),
-            seal: b("seal", false),
+            // dalla versione 2.1 i messaggi partono sigillati di base
+            seal: b("seal2", true),
             encryption: b("encryption", true),
             offline: b("offline", true),
             download_dir: s("download_dir", &downloads_dir()),
             absence_text: s("absence_text", ABSENCE_PRESETS[0].1),
+            password: s("password", ""),
+            password_all: b("password_all", false),
+            share_list: b("share_list", true),
         }
     }
 
@@ -105,15 +115,33 @@ impl Config {
             ("sound", bl(self.sound).into()),
             ("popup", bl(self.popup).into()),
             ("quote", bl(self.quote).into()),
-            ("seal", bl(self.seal).into()),
+            ("seal2", bl(self.seal).into()),
             ("encryption", bl(self.encryption).into()),
             ("offline", bl(self.offline).into()),
             ("download_dir", self.download_dir.clone()),
             ("absence_text", self.absence_text.clone()),
+            ("password", self.password.clone()),
+            ("password_all", bl(self.password_all).into()),
+            ("share_list", bl(self.share_list).into()),
         ];
         let text: String = lines.iter().map(|(k, v)| format!("{k}={}\n", escape(v))).collect();
         let _ = fs::write(Self::path(), text);
     }
+}
+
+/// Impronta (con sale) della password per i messaggi sigillati.
+pub fn password_hash(pw: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let salt: [u8; 8] = rand::random();
+    let salt = hex::encode(salt);
+    let d = Sha256::digest(format!("{salt}:{pw}").as_bytes());
+    format!("{salt}${}", hex::encode(d))
+}
+
+pub fn password_check(stored: &str, pw: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let Some((salt, h)) = stored.split_once('$') else { return false };
+    hex::encode(Sha256::digest(format!("{salt}:{pw}").as_bytes())) == h
 }
 
 fn escape(s: &str) -> String {
@@ -353,7 +381,8 @@ pub struct Queued {
     pub key: String,
     pub name: String,
     pub text: String,
-    pub sealed: bool,
+    /// 0 = normale, 1 = sigillato, 2 = sigillato con lucchetto
+    pub sealed: u8,
     pub written: String,
     pub files: Vec<String>,
 }
@@ -369,7 +398,7 @@ fn with_outbox<R>(f: impl FnOnce(&mut Vec<Queued>) -> R) -> R {
                     id: r[0].parse().unwrap_or(0),
                     key: r[1].clone(),
                     name: r[2].clone(),
-                    sealed: r[3] == "1",
+                    sealed: r[3].parse().unwrap_or(0),
                     written: r[4].clone(),
                     text: r[5].clone(),
                     files: r[6..].to_vec(),
@@ -388,7 +417,7 @@ fn save_outbox(v: &[Queued]) {
                 q.id.to_string(),
                 q.key.clone(),
                 q.name.clone(),
-                if q.sealed { "1".into() } else { "0".into() },
+                q.sealed.to_string(),
                 q.written.clone(),
                 q.text.clone(),
             ];
@@ -402,7 +431,7 @@ pub fn outbox_all() -> Vec<Queued> {
     with_outbox(|v| v.clone())
 }
 
-pub fn outbox_add(key: &str, name: &str, text: &str, sealed: bool, files: &[String]) {
+pub fn outbox_add(key: &str, name: &str, text: &str, sealed: u8, files: &[String]) {
     with_outbox(|v| {
         let id = v.iter().map(|q| q.id).max().unwrap_or(0) + 1;
         v.push(Queued {
@@ -668,7 +697,7 @@ mod tests {
         let k = known_add_manual("Marta", "Commerciale", "", "10.0.0.7");
         assert_eq!(k, "@10.0.0.7");
         tel_set(&k, "123");
-        outbox_add(&k, "Marta", "ciao", false, &[]);
+        outbox_add(&k, "Marta", "ciao", 0, &[]);
         group_save("G", &[k.clone()]);
         let ip: std::net::IpAddr = "10.0.0.7".parse().unwrap();
         assert_eq!(manual_match("pc-marta", ip).as_deref(), Some(k.as_str()));
