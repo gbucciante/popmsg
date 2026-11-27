@@ -469,13 +469,15 @@ impl Engine {
     /// `sealed`: 0 = normale, 1 = sigillato, 2 = sigillato con lucchetto (password)
     pub fn send_message(&self, users: &[User], text: &str, sealed: u8, attachments: &[PathBuf]) -> Vec<u64> {
         let mut files = Vec::new();
+        // numeri dei file come IP Messenger: base casuale (positiva) + indice
+        let id_base = (rand::random::<u32>() & 0x3fff_ffff).max(1);
         for (i, path) in attachments.iter().enumerate() {
             let Ok(md) = fs::metadata(path) else { continue };
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
             let pos = clip_pos(&name);
             let mtime = md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
             let info = FileInfo {
-                id: i as u32,
+                id: id_base.wrapping_add(i as u32) & 0x3fff_ffff,
                 name,
                 size: if md.is_dir() { 0 } else { md.len() },
                 mtime,
