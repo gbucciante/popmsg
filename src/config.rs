@@ -73,6 +73,8 @@ pub struct Config {
     pub update_auto: bool,
     /// cartella di rete con POPMSG.exe aggiornato ("" = release su GitHub)
     pub update_dir: String,
+    /// eseguibile per cui si è già chiesto se consentire POPMSG nel firewall
+    pub fw_asked: String,
 }
 
 impl Config {
@@ -114,6 +116,7 @@ impl Config {
             busy_text: s("busy_text", BUSY_TEXT),
             update_auto: b("update_auto", true),
             update_dir: s("update_dir", ""),
+            fw_asked: s("fw_asked", ""),
         }
     }
 
@@ -141,6 +144,7 @@ impl Config {
             ("busy_text", self.busy_text.clone()),
             ("update_auto", bl(self.update_auto).into()),
             ("update_dir", self.update_dir.clone()),
+            ("fw_asked", self.fw_asked.clone()),
         ];
         let text: String = lines.iter().map(|(k, v)| format!("{k}={}\n", escape(v))).collect();
         let _ = fs::write(Self::path(), text);

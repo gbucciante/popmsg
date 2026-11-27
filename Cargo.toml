@@ -1,6 +1,6 @@
 [package]
 name = "popmsg"
-version = "2.2.0"
+version = "2.2.1"
 description = "Messaggistica LAN compatibile con IP Messenger"
 edition = "2024"
 

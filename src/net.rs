@@ -1079,7 +1079,12 @@ impl Engine {
         };
         let data = self.packet(p::next_packet_no(), cmd, &req, &[]);
         let mut s = TcpStream::connect_timeout(&SocketAddr::V4(m.sender.addr), Duration::from_secs(15))
-            .map_err(|e| format!("connessione non riuscita: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "il computer di {} non accetta la connessione per il file ({e}).\n\n                     Di solito è il firewall di Windows su quel PC: lì apri POPMSG, tasto destro sulla lista                      → «Consenti POPMSG nel firewall…», oppure installa POPMSG con POPMSG-setup.exe.",
+                    m.sender.name()
+                )
+            })?;
         s.write_all(&data).map_err(|e| e.to_string())?;
         s.set_read_timeout(Some(Duration::from_secs(60))).ok();
         if dir {

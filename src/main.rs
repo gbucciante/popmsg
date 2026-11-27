@@ -5,6 +5,7 @@
 mod config;
 mod crypto;
 mod emoji;
+mod firewall;
 mod ipdict;
 mod net;
 #[cfg(test)]
@@ -27,6 +28,10 @@ pub enum Msg {
     Update(Result<Option<update::Available>, String>, bool),
     /// nuova versione installata (percorso da avviare) o errore
     UpdateDone(Result<std::path::PathBuf, String>),
+    /// esito del controllo del firewall (true = chiesto dall'utente)
+    Firewall(firewall::Fw, bool),
+    /// avviso da mostrare (titolo, testo)
+    Notice(String, String),
 }
 
 /// Canale verso il ciclo principale, usabile dai thread di lavoro.
@@ -99,6 +104,11 @@ fn main() {
             app::repeat_timeout3(0.2, h);
         });
     }
+    // firewall di Windows: senza regola gli altri non scaricano i file che invii
+    if cfg!(windows) {
+        let c = ctl.clone();
+        app::add_timeout3(5.0, move |_| c.check_firewall(false));
+    }
     // aggiornamenti: primo controllo dopo un minuto, poi ogni 6 ore
     {
         let c = ctl.clone();
@@ -119,6 +129,8 @@ fn main() {
                 Msg::Tray(c) => ctl.tray_cmd(c),
                 Msg::Update(r, manual) => ctl.on_update(r, manual),
                 Msg::UpdateDone(r) => ctl.on_update_done(r),
+                Msg::Firewall(st, manual) => ctl.on_firewall(st, manual),
+                Msg::Notice(t, x) => ui::notice(&t, &x),
                 Msg::TrayClick => {
                     if !ctl.show_unread() && !cfg!(windows) {
                         ctl.open_send(&[], "");

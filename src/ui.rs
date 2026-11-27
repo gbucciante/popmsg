@@ -528,7 +528,7 @@ impl SendWin {
             let (s, c) = (Rc::downgrade(&sw), ctl.clone());
             sw.list.set_menu(move || {
                 let Some(s) = s.upgrade() else { return };
-                let menu = fltk::menu::MenuItem::new(&["POPMSG ", "Chat di gruppo con i selezionati…", "Stato (disponibile, assente, occupato)…", "Modifica Tel…", "Aggiungi utente…", "Importa elenco utenti…", "Esporta elenco utenti…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Cerca aggiornamenti…", "Informazioni su POPMSG"]);
+                let menu = fltk::menu::MenuItem::new(&["POPMSG ", "Chat di gruppo con i selezionati…", "Stato (disponibile, assente, occupato)…", "Modifica Tel…", "Aggiungi utente…", "Importa elenco utenti…", "Esporta elenco utenti…", "Aggiorna elenco", "Messaggio di assenza…", "Versione del programma…", "Togli dalla lista (se non in linea)", "Impostazioni…", "Registro messaggi", "Cerca aggiornamenti…", "Consenti POPMSG nel firewall…", "Informazioni su POPMSG"]);
                 if let Some(mut v) = menu.at(0) {
                     v.set_label(&format!("POPMSG {}", crate::net::APP_VERSION));
                     v.deactivate();
@@ -600,6 +600,7 @@ impl SendWin {
                         "Impostazioni…" => c.tray_cmd(TrayCmd::Settings),
                         "Registro messaggi" => c.tray_cmd(TrayCmd::Log),
                         "Cerca aggiornamenti…" => c.check_updates(true),
+                        "Consenti POPMSG nel firewall…" => c.check_firewall(true),
                         "Informazioni su POPMSG" => c.tray_cmd(TrayCmd::About),
                         "Messaggio di assenza…" => sel.iter().for_each(|u| c.engine.request_absence(u)),
                         "Togli dalla lista (se non in linea)" => {
@@ -1076,8 +1077,11 @@ fn save_file(ctl: &Rc<Ctl>, m: &Message, info: &p::FileInfo, b: &mut Button) {
                 eng.release_files(&m);
             }
             Err(e) if !b.was_deleted() => {
-                b.set_label(&format!("{orig}   - errore: {e}"));
+                b.set_label(&format!("{orig}   - non scaricato, clic per riprovare"));
                 b.activate();
+                if let Some(tx) = crate::TX.get() {
+                    tx.send(crate::Msg::Notice(format!("File «{}» non scaricato", info.name), e.clone()));
+                }
             }
             Err(_) => {}
         }
@@ -2138,6 +2142,58 @@ impl Ctl {
                 std::process::exit(0);
             }
             Err(e) => notice("Aggiornamento non riuscito", &e),
+        }
+    }
+}
+
+// ============================================================ firewall
+impl Ctl {
+    pub fn check_firewall(&self, manual: bool) {
+        if !cfg!(windows) {
+            if manual {
+                notice("Firewall", "Su questo sistema non serve.");
+            }
+            return;
+        }
+        std::thread::spawn(move || {
+            let st = crate::firewall::check();
+            if let Some(tx) = crate::TX.get() {
+                tx.send(crate::Msg::Firewall(st, manual));
+            }
+        });
+    }
+
+    pub fn on_firewall(&self, st: crate::firewall::Fw, manual: bool) {
+        use crate::firewall::Fw;
+        if st == Fw::Ok && !manual {
+            return;
+        }
+        if st == Fw::Unknown && !manual {
+            return;
+        }
+        // una volta sola per ogni posizione del programma (una copia nuova va chiesta di nuovo)
+        let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        if !manual && self.cfg.borrow().fw_asked == exe {
+            return;
+        }
+        let q = if st == Fw::Ok {
+            "POPMSG è già consentito nel firewall di Windows.\nVuoi rifare comunque la regola?"
+        } else {
+            "Il firewall di Windows non consente a POPMSG le connessioni in ingresso:\n\
+             i messaggi arrivano, ma gli altri non possono scaricare i file che invii.\n\n\
+             Consentire POPMSG nel firewall? (serve la conferma di amministratore)"
+        };
+        {
+            let mut c = self.cfg.borrow_mut();
+            c.fw_asked = exe;
+            c.save();
+        }
+        if dialog::choice2_default(q, "No", "Consenti", "") != Some(1) {
+            return;
+        }
+        match crate::firewall::allow() {
+            Ok(()) => notice("Firewall", "Fatto: ora gli altri possono scaricare i file che invii."),
+            Err(e) => notice("Firewall", &e),
         }
     }
 }
